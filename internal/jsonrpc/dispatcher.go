@@ -2,7 +2,7 @@ package jsonrpc
 
 import "encoding/json"
 
-// HandlerFunc procesa una solicitud y espera respuesta 
+// HandlerFunc procesa una solicitud y espera respuesta
 // Devuelve el resultado a serializar o un ErrorObject ya formado
 type HandlerFunc func(params json.RawMessage) (result any, errObj *ErrorObject)
 
