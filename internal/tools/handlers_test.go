@@ -114,7 +114,7 @@ func TestGetRecipeDetails_IncludesAllergens(t *testing.T) {
 }
 
 func TestAdjustInventory_DamagedCheese_MatchesPlanExample(t *testing.T) {
-	// Replica el ejemplo de descontar 2000g (=2kg) de queso dañado. 
+	// Replica el ejemplo de descontar 2000g (=2kg) de queso dañado.
 	// El seed inicial tiene 40g
 	r := newTestRegistry(t)
 
