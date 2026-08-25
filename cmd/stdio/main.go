@@ -10,6 +10,8 @@ import (
 
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/jsonrpc"
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/mcp"
+	"github.com/DiegoOF07/restaurant-mcp-server/internal/storage"
+	"github.com/DiegoOF07/restaurant-mcp-server/internal/tools"
 )
 
 func main() {
@@ -21,6 +23,12 @@ func main() {
 		Version: "0.1.0",
 	})
 	lifecycle.Register(dispatcher)
+
+	repo := storage.NewInMemoryRepository()
+	repo.Seed()
+	registry := tools.NewRegistry(repo)
+	tools.RegisterRestaurantTools(registry)
+	mcp.RegisterTools(dispatcher, lifecycle, registry)
 
 	if err := run(os.Stdin, os.Stdout, dispatcher, logger); err != nil && err != io.EOF {
 		logger.Fatalf("fallo fatal en el bucle stdio: %v", err)
@@ -44,7 +52,6 @@ func run(in io.Reader, out io.Writer, dispatcher *jsonrpc.Dispatcher, logger *lo
 		parsed, errObj := jsonrpc.ParseMessage(line)
 		if errObj != nil {
 			logger.Printf("mensaje inválido descartado: %s", errObj.Error())
-			// Sin un id válido no hay a quién responder, se registra en stderr y se continúa
 			continue
 		}
 
