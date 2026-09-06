@@ -31,3 +31,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Bases SQLite (datos locales, nunca se versionan)
+*.db
+*.db-wal
+*.db-shm

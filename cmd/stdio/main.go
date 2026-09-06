@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/domain"
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/jsonrpc"
@@ -16,7 +18,16 @@ import (
 )
 
 func main() {
+	dbPath := flag.String("db", "", "ruta del archivo SQLite (por defecto restaurant.db junto al binario; usa :memory: para no persistir)")
+	flag.Parse()
+
 	logger := log.New(os.Stderr, "[restaurant-mcp-server] ", log.LstdFlags)
+
+	repo, err := openRepository(*dbPath, logger)
+	if err != nil {
+		logger.Fatalf("no se pudo abrir el almacenamiento: %v", err)
+	}
+	defer repo.Close()
 
 	dispatcher := jsonrpc.NewDispatcher()
 	lifecycle := mcp.NewLifecycle(mcp.ServerInfo{
@@ -25,8 +36,6 @@ func main() {
 	})
 	lifecycle.Register(dispatcher)
 
-	repo := storage.NewInMemoryRepository()
-	repo.Seed()
 	registry := tools.NewRegistry(repo)
 	tools.RegisterRestaurantTools(registry)
 
@@ -41,6 +50,51 @@ func main() {
 	if err := run(os.Stdin, os.Stdout, dispatcher, logger); err != nil && err != io.EOF {
 		logger.Fatalf("fallo fatal en el bucle stdio: %v", err)
 	}
+}
+
+// openRepository resuelve dónde vive la base y la deja lista para usar.
+//
+// Precedencia: la bandera --db, luego MCP_DB_PATH, y si ninguna está, un archivo
+// restaurant.db JUNTO AL BINARIO. Anclarlo al ejecutable y no al directorio de trabajo es
+// deliberado: el servidor lo lanza el host como subproceso, y el cwd que herede depende de
+// desde dónde se ejecutó el CLI. Con una ruta relativa al cwd, el mismo comando abriría
+// bases distintas según desde dónde se invoque, y el inventario "se perdería" sin explicación.
+func openRepository(flagPath string, logger *log.Logger) (*storage.SQLiteRepository, error) {
+	path := flagPath
+	if path == "" {
+		path = os.Getenv("MCP_DB_PATH")
+	}
+	if path == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("no se pudo ubicar el ejecutable para elegir la base: %w", err)
+		}
+		path = filepath.Join(filepath.Dir(exe), "restaurant.db")
+	}
+
+	repo, err := storage.OpenSQLite(path)
+	if err != nil {
+		return nil, err
+	}
+
+	empty, err := repo.IsEmpty()
+	if err != nil {
+		repo.Close()
+		return nil, fmt.Errorf("no se pudo inspeccionar la base: %w", err)
+	}
+	// Sólo se siembra una base vacía. En una ya usada, resembrar reescribiría el catálogo
+	// y confundiría cualquier ajuste de inventario previo.
+	if empty {
+		if err := repo.Seed(); err != nil {
+			repo.Close()
+			return nil, fmt.Errorf("no se pudo sembrar el catálogo inicial: %w", err)
+		}
+		logger.Printf("base nueva en %s: catálogo de demostración cargado", path)
+	} else {
+		logger.Printf("base existente en %s: se conserva el inventario guardado", path)
+	}
+
+	return repo, nil
 }
 
 // identityFromEnv lee el rol y el usuario de las variables de entorno.
