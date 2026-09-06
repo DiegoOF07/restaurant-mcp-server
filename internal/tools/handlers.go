@@ -37,10 +37,12 @@ func RegisterRestaurantTools(r *Registry) {
 		handler:     handleGetRecipeDetails,
 	})
 	r.register(Tool{
-		Name:        "adjust_inventory",
-		Description: "Registra una pérdida, daño o corrección en el inventario de un ingrediente. Requiere confirmación del usuario antes de ejecutarse; repetir la llamada con el mismo idempotencyKey no vuelve a descontar.",
-		InputSchema: adjustInventoryInputSchema,
-		handler:     handleAdjustInventory,
+		Name: "adjust_inventory",
+		// Sección 13.1 del plan: los ajustes de inventario se restringen a cocina y administración.
+		RequiredRoles: domain.RoleSet{domain.RoleCook, domain.RoleAdmin},
+		Description:   "Registra una pérdida, daño o corrección en el inventario de un ingrediente. Requiere confirmación del usuario antes de ejecutarse; repetir la llamada con el mismo idempotencyKey no vuelve a descontar.",
+		InputSchema:   adjustInventoryInputSchema,
+		handler:       handleAdjustInventory,
 	})
 }
 
@@ -57,13 +59,13 @@ type dishSummary struct {
 	Active      bool   `json:"active"`
 }
 
-func handleSearchDishes(repo storage.Repository, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject) {
+func handleSearchDishes(ctx CallContext, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject) {
 	var args searchDishesArgs
 	if err := json.Unmarshal(rawArgs, &args); err != nil {
 		return CallToolResult{}, jsonrpc.InvalidParams("no se pudieron interpretar los argumentos de search_dishes: " + err.Error())
 	}
 
-	dishes := repo.SearchDishes(args.Name)
+	dishes := ctx.Repo.SearchDishes(args.Name)
 	summaries := make([]dishSummary, 0, len(dishes))
 	for _, d := range dishes {
 		summaries = append(summaries, dishSummary{ID: d.ID, Name: d.Name, Description: d.Description, Active: d.Active})
@@ -89,16 +91,16 @@ type ingredientSummary struct {
 	AvailableQuantity int64  `json:"availableQuantity"`
 }
 
-func handleSearchIngredients(repo storage.Repository, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject) {
+func handleSearchIngredients(ctx CallContext, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject) {
 	var args searchIngredientsArgs
 	if err := json.Unmarshal(rawArgs, &args); err != nil {
 		return CallToolResult{}, jsonrpc.InvalidParams("no se pudieron interpretar los argumentos de search_ingredients: " + err.Error())
 	}
 
-	ingredients := repo.SearchIngredients(args.Name)
+	ingredients := ctx.Repo.SearchIngredients(args.Name)
 	summaries := make([]ingredientSummary, 0, len(ingredients))
 	for _, ing := range ingredients {
-		available, _ := repo.InventoryQuantity(ing.ID)
+		available, _ := ctx.Repo.InventoryQuantity(ing.ID)
 		summaries = append(summaries, ingredientSummary{
 			ID:                ing.ID,
 			Name:              ing.Name,
@@ -135,7 +137,7 @@ type dishAvailabilityResult struct {
 	MissingIngredients []missingIngredient `json:"missingIngredients"`
 }
 
-func handleGetDishAvailability(repo storage.Repository, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject) {
+func handleGetDishAvailability(ctx CallContext, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject) {
 	var args getDishAvailabilityArgs
 	if err := json.Unmarshal(rawArgs, &args); err != nil {
 		return CallToolResult{}, jsonrpc.InvalidParams("no se pudieron interpretar los argumentos de get_dish_availability: " + err.Error())
@@ -144,7 +146,7 @@ func handleGetDishAvailability(repo storage.Repository, rawArgs json.RawMessage)
 		return CallToolResult{}, jsonrpc.InvalidParams("servings debe ser mayor que cero")
 	}
 
-	dish, ok := repo.FindDish(args.DishID)
+	dish, ok := ctx.Repo.FindDish(args.DishID)
 	if !ok {
 		return errorResult(fmt.Sprintf("no existe el platillo %q", args.DishID)), nil
 	}
@@ -156,17 +158,17 @@ func handleGetDishAvailability(repo storage.Repository, rawArgs json.RawMessage)
 		), nil
 	}
 
-	recipe, _ := repo.RecipeForDish(args.DishID)
+	recipe, _ := ctx.Repo.RecipeForDish(args.DishID)
 
 	var maxServings int64 = -1 // -1 = aún no calculado
 	missing := make([]missingIngredient, 0)
 
 	for _, item := range recipe {
-		ing, ok := repo.Ingredient(item.IngredientID)
+		ing, ok := ctx.Repo.Ingredient(item.IngredientID)
 		if !ok {
 			return CallToolResult{}, jsonrpc.InternalError("la receta referencia un ingrediente inexistente")
 		}
-		available, _ := repo.InventoryQuantity(item.IngredientID)
+		available, _ := ctx.Repo.InventoryQuantity(item.IngredientID)
 
 		// Una cantidad por porción no positiva es un dato corrupto, no una consulta inválida:
 		// dividir entre cero haría panic y mataría el proceso completo del servidor.
@@ -226,21 +228,21 @@ type recipeDetailsResult struct {
 	Ingredients []recipeIngredient `json:"ingredients"`
 }
 
-func handleGetRecipeDetails(repo storage.Repository, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject) {
+func handleGetRecipeDetails(ctx CallContext, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject) {
 	var args getRecipeDetailsArgs
 	if err := json.Unmarshal(rawArgs, &args); err != nil {
 		return CallToolResult{}, jsonrpc.InvalidParams("no se pudieron interpretar los argumentos de get_recipe_details: " + err.Error())
 	}
 
-	dish, ok := repo.FindDish(args.DishID)
+	dish, ok := ctx.Repo.FindDish(args.DishID)
 	if !ok {
 		return errorResult(fmt.Sprintf("no existe el platillo %q", args.DishID)), nil
 	}
 
-	recipe, _ := repo.RecipeForDish(args.DishID)
+	recipe, _ := ctx.Repo.RecipeForDish(args.DishID)
 	ingredients := make([]recipeIngredient, 0, len(recipe))
 	for _, item := range recipe {
-		ing, ok := repo.Ingredient(item.IngredientID)
+		ing, ok := ctx.Repo.Ingredient(item.IngredientID)
 		if !ok {
 			return CallToolResult{}, jsonrpc.InternalError("la receta referencia un ingrediente inexistente")
 		}
@@ -278,7 +280,7 @@ type adjustInventoryResult struct {
 	Idempotent        bool   `json:"idempotent"`
 }
 
-func handleAdjustInventory(repo storage.Repository, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject) {
+func handleAdjustInventory(ctx CallContext, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject) {
 	var args adjustInventoryArgs
 	if err := json.Unmarshal(rawArgs, &args); err != nil {
 		return CallToolResult{}, jsonrpc.InvalidParams("no se pudieron interpretar los argumentos de adjust_inventory: " + err.Error())
@@ -290,7 +292,7 @@ func handleAdjustInventory(repo storage.Repository, rawArgs json.RawMessage) (Ca
 		return CallToolResult{}, jsonrpc.InvalidParams("operation debe ser una de: add, subtract, set")
 	}
 
-	ing, ok := repo.Ingredient(args.IngredientID)
+	ing, ok := ctx.Repo.Ingredient(args.IngredientID)
 	if !ok {
 		return errorResult(fmt.Sprintf("no existe el ingrediente %q", args.IngredientID)), nil
 	}
@@ -302,13 +304,13 @@ func handleAdjustInventory(repo storage.Repository, rawArgs json.RawMessage) (Ca
 		)), nil
 	}
 
-	result, err := repo.ApplyMovement(storage.MovementRequest{
+	result, err := ctx.Repo.ApplyMovement(storage.MovementRequest{
 		IdempotencyKey: args.IdempotencyKey,
 		IngredientID:   args.IngredientID,
 		Operation:      args.Operation,
 		QuantityBase:   quantityBase,
 		Reason:         args.Reason,
-		PerformedBy:    "unspecified",
+		PerformedBy:    ctx.UserID,
 	})
 	if err != nil {
 		switch err {
@@ -316,7 +318,7 @@ func handleAdjustInventory(repo storage.Repository, rawArgs json.RawMessage) (Ca
 			return errorResult(fmt.Sprintf(
 				"la operación %q de %d %s sobre %q dejaría el inventario en negativo; disponible actualmente: %d %s",
 				args.Operation, quantityBase, ing.BaseUnit, ing.ID,
-				mustCurrentQuantity(repo, ing.ID), ing.BaseUnit,
+				mustCurrentQuantity(ctx.Repo, ing.ID), ing.BaseUnit,
 			)), nil
 		case domain.ErrIngredientNotFound:
 			return errorResult(fmt.Sprintf("no existe el ingrediente %q", args.IngredientID)), nil

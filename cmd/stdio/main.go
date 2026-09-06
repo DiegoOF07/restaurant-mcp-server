@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/DiegoOF07/restaurant-mcp-server/internal/domain"
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/jsonrpc"
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/mcp"
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/storage"
@@ -28,11 +29,41 @@ func main() {
 	repo.Seed()
 	registry := tools.NewRegistry(repo)
 	tools.RegisterRestaurantTools(registry)
+
+	// Identidad de la conexión. Con stdio el servidor es un subproceso lanzado por el host,
+	// así que el rol llega por entorno. Si no viene o no se reconoce, se conserva el rol menos
+	// privilegiado que NewRegistry ya dejó puesto: fallar cerrado.
+	role, userID := identityFromEnv(logger)
+	registry.SetIdentity(role, userID)
+	logger.Printf("identidad activa: rol=%s usuario=%s", role, userID)
 	mcp.RegisterTools(dispatcher, lifecycle, registry)
 
 	if err := run(os.Stdin, os.Stdout, dispatcher, logger); err != nil && err != io.EOF {
 		logger.Fatalf("fallo fatal en el bucle stdio: %v", err)
 	}
+}
+
+// identityFromEnv lee el rol y el usuario de las variables de entorno.
+// Un rol desconocido NO cae a uno con más permisos: se degrada al menos privilegiado
+// y se deja constancia en stderr.
+func identityFromEnv(logger *log.Logger) (domain.Role, string) {
+	userID := os.Getenv("MCP_USER_ID")
+	if userID == "" {
+		userID = "unspecified"
+	}
+
+	raw := os.Getenv("MCP_USER_ROLE")
+	if raw == "" {
+		logger.Printf("MCP_USER_ROLE no está definida; se usa el rol %q (solo lectura)", domain.RoleWaiter)
+		return domain.RoleWaiter, userID
+	}
+
+	role, ok := domain.ParseRole(raw)
+	if !ok {
+		logger.Printf("MCP_USER_ROLE=%q no es un rol válido; se usa %q (solo lectura)", raw, domain.RoleWaiter)
+		return domain.RoleWaiter, userID
+	}
+	return role, userID
 }
 
 // run contiene el bucle principal, separado de main para poder probarlo con buffers

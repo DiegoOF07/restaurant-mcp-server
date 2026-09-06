@@ -105,6 +105,16 @@ func (r *InMemoryRepository) InventoryQuantity(ingredientID string) (int64, bool
 	return r.inventory[ingredientID], true // 0 por defecto si nunca se sembró
 }
 
+// MovementByKey devuelve el movimiento registrado bajo una clave de idempotencia.
+// Sirve para auditar quién hizo cada ajuste (sección 13.2 del plan) y para verificar
+// que un reintento no volvió a descontar.
+func (r *InMemoryRepository) MovementByKey(key string) (domain.InventoryMovement, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m, ok := r.movementsByKey[key]
+	return m, ok
+}
+
 // ApplyMovement aplica un ajuste de inventario de forma atómica donde toda la
 // operación ocurre bajo un mismo lock, así que no puede quedar el
 // inventario a medio actualizar ni perderse una actualización concurrente.

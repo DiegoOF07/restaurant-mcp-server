@@ -3,7 +3,10 @@ package tools
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 
+	"github.com/DiegoOF07/restaurant-mcp-server/internal/domain"
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/jsonrpc"
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/storage"
 )
@@ -23,7 +26,15 @@ type CallToolResult struct {
 
 // HandlerFunc ejecuta la lógica de una herramienta. Devuelve el resultado
 // ya armado y el propio handler decide si es éxito o isError:true
-type HandlerFunc func(repo storage.Repository, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject)
+type HandlerFunc func(ctx CallContext, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject)
+
+// CallContext lleva todo lo que un handler necesita además de sus argumentos:
+// el repositorio y la identidad de quien ejecuta la llamada.
+type CallContext struct {
+	Repo   storage.Repository
+	Role   domain.Role
+	UserID string
+}
 
 // Tool es la definición completa de una herramienta expuesta por tools/list
 type Tool struct {
@@ -31,19 +42,42 @@ type Tool struct {
 	Description  string         `json:"description"`
 	InputSchema  map[string]any `json:"inputSchema"`
 	OutputSchema map[string]any `json:"outputSchema,omitempty"`
-	handler      HandlerFunc
+
+	// RequiredRoles limita quién puede ejecutar la herramienta. Vacío = cualquier rol.
+	// No se serializa: es una regla del servidor, no parte del contrato que ve el cliente.
+	RequiredRoles domain.RoleSet `json:"-"`
+
+	handler HandlerFunc
 }
 
-// Registry contiene todas las herramientas disponibles y el repositorio sobre el que operan
+// Registry contiene todas las herramientas disponibles, el repositorio sobre el que operan
+// y la identidad bajo la que se ejecutan las llamadas de esta conexión.
 type Registry struct {
-	repo  storage.Repository
-	tools map[string]Tool
-	order []string // conserva el orden de registro para tools/list
+	repo   storage.Repository
+	role   domain.Role
+	userID string
+	tools  map[string]Tool
+	order  []string // conserva el orden de registro para tools/list
 }
 
-// NewRegistry crea un registro vacío ligado a un Repository concreto
+// NewRegistry crea un registro vacío ligado a un Repository concreto.
+// El rol arranca en el MENOS privilegiado: si nadie configura una identidad, el servidor
+// queda de solo lectura en vez de permitir mutaciones sin supervisión.
 func NewRegistry(repo storage.Repository) *Registry {
-	return &Registry{repo: repo, tools: make(map[string]Tool)}
+	return &Registry{repo: repo, role: domain.RoleWaiter, userID: "unspecified", tools: make(map[string]Tool)}
+}
+
+// SetIdentity fija el rol y el identificador del usuario de esta conexión.
+func (r *Registry) SetIdentity(role domain.Role, userID string) {
+	r.role = role
+	if userID != "" {
+		r.userID = userID
+	}
+}
+
+// Role devuelve el rol activo de esta conexión.
+func (r *Registry) Role() domain.Role {
+	return r.role
 }
 
 func (r *Registry) register(t Tool) {
@@ -66,7 +100,17 @@ func (r *Registry) Call(name string, rawArgs json.RawMessage) (CallToolResult, *
 	if !ok {
 		return CallToolResult{}, jsonrpc.InvalidParams("herramienta desconocida: " + name)
 	}
-	return tool.handler(r.repo, rawArgs)
+
+	// El permiso se valida ACÁ, en el servidor. Que la interfaz también pida confirmación
+	// es una capa distinta y no sustituye a esta.
+	if !tool.RequiredRoles.Allows(r.role) {
+		return errorResult(fmt.Sprintf(
+			"el rol %q no está autorizado para ejecutar %q; se requiere uno de: %s",
+			r.role, name, strings.Join(tool.RequiredRoles.Names(), ", "),
+		)), nil
+	}
+
+	return tool.handler(CallContext{Repo: r.repo, Role: r.role, UserID: r.userID}, rawArgs)
 }
 
 // errorResult construye un CallToolResult de error de negocio con un

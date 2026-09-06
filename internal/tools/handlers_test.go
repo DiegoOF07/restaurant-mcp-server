@@ -8,12 +8,20 @@ import (
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/storage"
 )
 
+// newTestRegistry construye un registro con rol admin: la mayoría de las pruebas ejercitan
+// la lógica de las herramientas, no el control de acceso, que tiene sus propias pruebas.
 func newTestRegistry(t *testing.T) *Registry {
+	t.Helper()
+	return newTestRegistryAs(t, domain.RoleAdmin)
+}
+
+func newTestRegistryAs(t *testing.T, role domain.Role) *Registry {
 	t.Helper()
 	repo := storage.NewInMemoryRepository()
 	repo.Seed()
 	r := NewRegistry(repo)
 	RegisterRestaurantTools(r)
+	r.SetIdentity(role, "usuario-de-prueba")
 	return r
 }
 
@@ -290,5 +298,104 @@ func TestGetDishAvailability_DishWithoutRecipeIsNotAvailable(t *testing.T) {
 	}
 	if parsed.MaximumServings != 0 {
 		t.Errorf("esperaba maximumServings=0, obtuve %d", parsed.MaximumServings)
+	}
+}
+
+// --- Control de acceso por roles (sección 13.1 del plan) ---
+
+func TestAdjustInventory_DeniedForWaiter(t *testing.T) {
+	r := newTestRegistryAs(t, domain.RoleWaiter)
+	result, errObj := r.Call("adjust_inventory",
+		json.RawMessage(`{"ingredientId":"cheese","operation":"subtract","quantity":10,"unit":"g","idempotencyKey":"k1"}`))
+
+	// Falta de permiso es un error de NEGOCIO, no de protocolo: el asistente debe poder
+	// explicárselo al usuario.
+	if errObj != nil {
+		t.Fatalf("esperaba un error de negocio, no de protocolo: %v", errObj)
+	}
+	if !result.IsError {
+		t.Fatal("esperaba isError=true por falta de permisos")
+	}
+
+	// Y sobre todo: el inventario NO debe haber cambiado.
+	repo := storage.NewInMemoryRepository()
+	repo.Seed()
+	if qty, _ := repo.InventoryQuantity("cheese"); qty != 40 {
+		t.Fatalf("el seed cambió; esta prueba asume 40g de queso, obtuve %d", qty)
+	}
+	after, _ := r.repo.InventoryQuantity("cheese")
+	if after != 40 {
+		t.Errorf("una llamada denegada no debe tocar el inventario: quedó en %d", after)
+	}
+}
+
+func TestAdjustInventory_AllowedForCookAndAdmin(t *testing.T) {
+	for _, role := range []domain.Role{domain.RoleCook, domain.RoleAdmin} {
+		r := newTestRegistryAs(t, role)
+		result, errObj := r.Call("adjust_inventory",
+			json.RawMessage(`{"ingredientId":"cheese","operation":"add","quantity":10,"unit":"g","idempotencyKey":"k-`+string(role)+`"}`))
+		if errObj != nil {
+			t.Fatalf("rol %s: no esperaba error de protocolo: %v", role, errObj)
+		}
+		if result.IsError {
+			t.Errorf("rol %s: no debería estar denegado: %+v", role, result.Content)
+		}
+	}
+}
+
+func TestReadOnlyTools_AllowedForEveryRole(t *testing.T) {
+	readOnly := []struct {
+		name string
+		args string
+	}{
+		{"search_dishes", `{"name":""}`},
+		{"search_ingredients", `{"name":""}`},
+		{"get_dish_availability", `{"dishId":"special-burger","servings":1}`},
+		{"get_recipe_details", `{"dishId":"special-burger"}`},
+	}
+
+	for _, role := range []domain.Role{domain.RoleWaiter, domain.RoleCook, domain.RoleAdmin} {
+		r := newTestRegistryAs(t, role)
+		for _, tc := range readOnly {
+			result, errObj := r.Call(tc.name, json.RawMessage(tc.args))
+			if errObj != nil {
+				t.Errorf("rol %s, %s: error de protocolo inesperado: %v", role, tc.name, errObj)
+				continue
+			}
+			if result.IsError {
+				t.Errorf("rol %s: %s no debería estar restringida", role, tc.name)
+			}
+		}
+	}
+}
+
+func TestNewRegistry_DefaultsToLeastPrivilegedRole(t *testing.T) {
+	// Fallar cerrado: sin identidad configurada el servidor queda de solo lectura.
+	repo := storage.NewInMemoryRepository()
+	repo.Seed()
+	r := NewRegistry(repo)
+	if r.Role() != domain.RoleWaiter {
+		t.Errorf("esperaba el rol menos privilegiado por defecto, obtuve %q", r.Role())
+	}
+}
+
+func TestAdjustInventory_RecordsWhoPerformedIt(t *testing.T) {
+	repo := storage.NewInMemoryRepository()
+	repo.Seed()
+	r := NewRegistry(repo)
+	RegisterRestaurantTools(r)
+	r.SetIdentity(domain.RoleAdmin, "diego")
+
+	if _, errObj := r.Call("adjust_inventory",
+		json.RawMessage(`{"ingredientId":"cheese","operation":"add","quantity":10,"unit":"g","idempotencyKey":"auditoria-1"}`)); errObj != nil {
+		t.Fatalf("no esperaba error: %v", errObj)
+	}
+
+	movement, ok := repo.MovementByKey("auditoria-1")
+	if !ok {
+		t.Fatal("esperaba encontrar el movimiento registrado")
+	}
+	if movement.PerformedBy != "diego" {
+		t.Errorf("esperaba PerformedBy=diego, obtuve %q", movement.PerformedBy)
 	}
 }

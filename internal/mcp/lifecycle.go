@@ -8,9 +8,23 @@ import (
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/jsonrpc"
 )
 
-// ProtocolVersion es la única versión de MCP que este servidor negocia.
-// Si el cliente pide una distinta, se responde error de invalid params
+// ProtocolVersion es la versión preferida de este servidor: la que se ofrece cuando el cliente
+// pide una que no soportamos.
 const ProtocolVersion = "2025-06-18"
+
+// SupportedVersions son todas las versiones de MCP que este servidor sabe hablar, de la más
+// preferida a la menos. Hoy es una sola, pero la negociación ya está escrita para varias.
+var SupportedVersions = []string{ProtocolVersion}
+
+// supports indica si el servidor puede hablar la versión pedida.
+func supports(version string) bool {
+	for _, v := range SupportedVersions {
+		if v == version {
+			return true
+		}
+	}
+	return false
+}
 
 // ServerInfo identifica a este servidor ante el cliente
 type ServerInfo struct {
@@ -42,10 +56,18 @@ type InitializeResult struct {
 // Lifecycle mantiene el estado mínimo del ciclo de vida de una conexión MCP
 // Un servidor stdio atiende una sola conexión a la vez, así que este estado vive por proceso
 type Lifecycle struct {
-	mu          sync.Mutex
-	initialized bool
-	confirmed   bool
-	serverInfo  ServerInfo
+	mu                sync.Mutex
+	initialized       bool
+	confirmed         bool
+	negotiatedVersion string
+	serverInfo        ServerInfo
+}
+
+// NegotiatedVersion devuelve la versión acordada en initialize, o "" si aún no ocurrió.
+func (l *Lifecycle) NegotiatedVersion() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.negotiatedVersion
 }
 
 // NewLifecycle crea el estado de ciclo de vida para un servidor identificado
@@ -69,18 +91,20 @@ func (l *Lifecycle) handleInitialize(params json.RawMessage) (any, *jsonrpc.Erro
 	if p.ProtocolVersion == "" {
 		return nil, jsonrpc.InvalidParams(`falta el campo requerido "protocolVersion"`)
 	}
-	if p.ProtocolVersion != ProtocolVersion {
-		return nil, jsonrpc.InvalidParams(
-			"versión de protocolo no soportada: se requiere " + ProtocolVersion,
-		)
+	// La especificación exige responder con una versión que SÍ soportemos en vez de fallar:
+	// así un cliente con otra versión puede decidir si se adapta o corta la conexión.
+	negotiated := p.ProtocolVersion
+	if !supports(negotiated) {
+		negotiated = ProtocolVersion
 	}
 
 	l.mu.Lock()
 	l.initialized = true
+	l.negotiatedVersion = negotiated
 	l.mu.Unlock()
 
 	return InitializeResult{
-		ProtocolVersion: ProtocolVersion,
+		ProtocolVersion: negotiated,
 		Capabilities: ServerCapabilities{
 			Tools: &struct {
 				ListChanged bool `json:"listChanged"`

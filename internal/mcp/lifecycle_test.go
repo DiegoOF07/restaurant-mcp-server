@@ -50,7 +50,7 @@ func TestInitialize_Success(t *testing.T) {
 	}
 }
 
-func TestInitialize_RejectsUnsupportedVersion(t *testing.T) {
+func TestInitialize_NegotiatesUnsupportedVersion(t *testing.T) {
 	d, _ := newTestDispatcher()
 
 	params, _ := json.Marshal(InitializeParams{ProtocolVersion: "2024-01-01"})
@@ -61,12 +61,43 @@ func TestInitialize_RejectsUnsupportedVersion(t *testing.T) {
 		Params:  params,
 	}
 
+	// La especificación 2025-06-18 NO permite fallar acá: el servidor debe responder con una
+	// versión que sí soporte y dejar que el cliente decida si continúa o corta.
 	resp := d.Dispatch(req)
-	if resp.Error == nil {
-		t.Fatal("esperaba error por versión no soportada")
+	if resp.Error != nil {
+		t.Fatalf("no esperaba error, la versión se negocia: %v", resp.Error)
 	}
-	if resp.Error.Code != jsonrpc.CodeInvalidParams {
-		t.Errorf("código esperado %d, obtuve %d", jsonrpc.CodeInvalidParams, resp.Error.Code)
+
+	body, _ := json.Marshal(resp.Result)
+	var result InitializeResult
+	json.Unmarshal(body, &result)
+
+	if result.ProtocolVersion != ProtocolVersion {
+		t.Errorf("esperaba que el servidor ofreciera %q, obtuve %q", ProtocolVersion, result.ProtocolVersion)
+	}
+}
+
+func TestInitialize_EchoesASupportedVersion(t *testing.T) {
+	d, _ := newTestDispatcher()
+	params, _ := json.Marshal(InitializeParams{ProtocolVersion: ProtocolVersion})
+	req := jsonrpc.Request{
+		JSONRPC: jsonrpc.Version,
+		ID:      jsonrpc.NewIntID(1),
+		Method:  "initialize",
+		Params:  params,
+	}
+
+	resp := d.Dispatch(req)
+	if resp.Error != nil {
+		t.Fatalf("no esperaba error: %v", resp.Error)
+	}
+
+	body, _ := json.Marshal(resp.Result)
+	var result InitializeResult
+	json.Unmarshal(body, &result)
+
+	if result.ProtocolVersion != ProtocolVersion {
+		t.Errorf("esperaba %q, obtuve %q", ProtocolVersion, result.ProtocolVersion)
 	}
 }
 
