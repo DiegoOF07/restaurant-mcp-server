@@ -78,3 +78,15 @@ var adjustInventoryInputSchema = map[string]any{
 	"required":             []string{"ingredientId", "operation", "quantity", "unit", "idempotencyKey"},
 	"additionalProperties": false,
 }
+
+var searchIngredientsInputSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"name": map[string]any{
+			"type":        "string",
+			"description": "Texto a buscar en el nombre o el identificador del ingrediente. Cadena vacía devuelve todos los ingredientes.",
+		},
+	},
+	"required":             []string{"name"},
+	"additionalProperties": false,
+}

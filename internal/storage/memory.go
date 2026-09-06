@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,14 @@ func NewInMemoryRepository() *InMemoryRepository {
 		inventory:      make(map[string]int64),
 		movementsByKey: make(map[string]domain.InventoryMovement),
 	}
+}
+
+// AddDish registra o reemplaza un platillo. No forma parte de Repository y es una operación de
+// carga de datos, no de consulta, y sólo la usan el seed y las pruebas.
+func (r *InMemoryRepository) AddDish(d domain.Dish) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dishes[d.ID] = d
 }
 
 func (r *InMemoryRepository) FindDish(id string) (domain.Dish, bool) {
@@ -68,6 +77,23 @@ func (r *InMemoryRepository) Ingredient(id string) (domain.Ingredient, bool) {
 	defer r.mu.Unlock()
 	ing, ok := r.ingredients[id]
 	return ing, ok
+}
+
+// SearchIngredients busca ingredientes cuyo nombre o identificador contenga query.
+// Con query vacío devuelve todos
+func (r *InMemoryRepository) SearchIngredients(query string) []domain.Ingredient {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	q := strings.ToLower(strings.TrimSpace(query))
+	results := make([]domain.Ingredient, 0, len(r.ingredients))
+	for _, ing := range r.ingredients {
+		if q == "" || strings.Contains(strings.ToLower(ing.Name), q) || strings.Contains(strings.ToLower(ing.ID), q) {
+			results = append(results, ing)
+		}
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].ID < results[j].ID })
+	return results
 }
 
 func (r *InMemoryRepository) InventoryQuantity(ingredientID string) (int64, bool) {

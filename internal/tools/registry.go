@@ -64,7 +64,7 @@ func (r *Registry) List() []Tool {
 func (r *Registry) Call(name string, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject) {
 	tool, ok := r.tools[name]
 	if !ok {
-		return CallToolResult{}, jsonrpc.InvalidParams("unknown tool: " + name)
+		return CallToolResult{}, jsonrpc.InvalidParams("herramienta desconocida: " + name)
 	}
 	return tool.handler(r.repo, rawArgs)
 }

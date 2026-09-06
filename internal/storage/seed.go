@@ -9,22 +9,22 @@ func (r *InMemoryRepository) Seed() {
 	defer r.mu.Unlock()
 
 	ingredients := []domain.Ingredient{
-		{ID: "cheese", Name: "Cheddar cheese", BaseUnit: domain.UnitGram, AllergenCategory: "dairy"},
-		{ID: "bun", Name: "Burger bun", BaseUnit: domain.UnitPiece, AllergenCategory: "gluten"},
-		{ID: "patty", Name: "Beef patty", BaseUnit: domain.UnitPiece, AllergenCategory: ""},
-		{ID: "lettuce", Name: "Lettuce", BaseUnit: domain.UnitGram, AllergenCategory: ""},
-		{ID: "flour", Name: "Wheat flour", BaseUnit: domain.UnitGram, AllergenCategory: "gluten"},
-		{ID: "chocolate", Name: "Dark chocolate", BaseUnit: domain.UnitGram, AllergenCategory: "dairy"},
-		{ID: "milk", Name: "Whole milk", BaseUnit: domain.UnitMilliliter, AllergenCategory: "dairy"},
-		{ID: "walnuts", Name: "Walnuts", BaseUnit: domain.UnitGram, AllergenCategory: "nuts"},
+		{ID: "cheese", Name: "Queso cheddar", BaseUnit: domain.UnitGram, AllergenCategory: "lácteos"},
+		{ID: "bun", Name: "Pan de hamburguesa", BaseUnit: domain.UnitPiece, AllergenCategory: "gluten"},
+		{ID: "patty", Name: "Carne de res", BaseUnit: domain.UnitPiece, AllergenCategory: ""},
+		{ID: "lettuce", Name: "Lechuga", BaseUnit: domain.UnitGram, AllergenCategory: ""},
+		{ID: "flour", Name: "Harina de trigo", BaseUnit: domain.UnitGram, AllergenCategory: "gluten"},
+		{ID: "chocolate", Name: "Chocolate amargo", BaseUnit: domain.UnitGram, AllergenCategory: "lácteos"},
+		{ID: "milk", Name: "Leche entera", BaseUnit: domain.UnitMilliliter, AllergenCategory: "lácteos"},
+		{ID: "walnuts", Name: "Nueces", BaseUnit: domain.UnitGram, AllergenCategory: "frutos secos"},
 	}
 	for _, ing := range ingredients {
 		r.ingredients[ing.ID] = ing
 	}
 
 	dishes := []domain.Dish{
-		{ID: "special-burger", Name: "Special Burger", Description: "House burger with cheddar and lettuce", Active: true},
-		{ID: "chocolate-cake", Name: "Chocolate Cake", Description: "Dark chocolate cake with walnuts", Active: true},
+		{ID: "special-burger", Name: "Hamburguesa Especial", Description: "Hamburguesa de la casa con cheddar y lechuga", Active: true},
+		{ID: "chocolate-cake", Name: "Pastel de Chocolate", Description: "Pastel de chocolate amargo con nueces", Active: true},
 	}
 	for _, d := range dishes {
 		r.dishes[d.ID] = d

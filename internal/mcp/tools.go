@@ -22,22 +22,22 @@ type callToolParams struct {
 func RegisterTools(d *jsonrpc.Dispatcher, lifecycle *Lifecycle, registry *tools.Registry) {
 	d.RegisterMethod("tools/list", func(params json.RawMessage) (any, *jsonrpc.ErrorObject) {
 		if !lifecycle.Ready() {
-			return nil, jsonrpc.InvalidRequest("tools/list called before completing MCP initialization")
+			return nil, jsonrpc.InvalidRequest("se llamó a tools/list antes de completar la inicialización MCP")
 		}
 		return listToolsResult{Tools: registry.List()}, nil
 	})
 
 	d.RegisterMethod("tools/call", func(params json.RawMessage) (any, *jsonrpc.ErrorObject) {
 		if !lifecycle.Ready() {
-			return nil, jsonrpc.InvalidRequest("tools/call called before completing MCP initialization")
+			return nil, jsonrpc.InvalidRequest("se llamó a tools/call antes de completar la inicialización MCP")
 		}
 
 		var p callToolParams
 		if err := json.Unmarshal(params, &p); err != nil {
-			return nil, jsonrpc.InvalidParams("could not parse tools/call params: " + err.Error())
+			return nil, jsonrpc.InvalidParams("no se pudieron interpretar los parámetros de tools/call: " + err.Error())
 		}
 		if p.Name == "" {
-			return nil, jsonrpc.InvalidParams(`missing required field "name"`)
+			return nil, jsonrpc.InvalidParams(`falta el campo requerido "name"`)
 		}
 
 		result, errObj := registry.Call(p.Name, p.Arguments)

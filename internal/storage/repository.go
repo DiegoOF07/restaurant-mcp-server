@@ -27,6 +27,7 @@ type Repository interface {
 	SearchDishes(query string) []domain.Dish
 	RecipeForDish(dishID string) ([]domain.RecipeItem, bool)
 	Ingredient(id string) (domain.Ingredient, bool)
+	SearchIngredients(query string) []domain.Ingredient
 	InventoryQuantity(ingredientID string) (int64, bool)
 	ApplyMovement(req MovementRequest) (MovementResult, error)
 }

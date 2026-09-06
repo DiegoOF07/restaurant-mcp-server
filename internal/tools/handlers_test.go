@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/DiegoOF07/restaurant-mcp-server/internal/domain"
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/storage"
 )
 
@@ -16,11 +17,61 @@ func newTestRegistry(t *testing.T) *Registry {
 	return r
 }
 
-func TestRegistry_List_ReturnsFourTools(t *testing.T) {
+func TestRegistry_List_ReturnsTheRegisteredTools(t *testing.T) {
+	// Se afirma el conjunto exacto de nombres y no sólo la cantidad: un nombre de herramienta es
+	// parte del contrato público del servidor, y renombrar una sin darse cuenta rompe al cliente.
+	expected := []string{
+		"search_dishes",
+		"search_ingredients",
+		"get_dish_availability",
+		"get_recipe_details",
+		"adjust_inventory",
+	}
+
 	r := newTestRegistry(t)
 	list := r.List()
-	if len(list) != 4 {
-		t.Fatalf("esperaba 4 herramientas, obtuve %d", len(list))
+	if len(list) != len(expected) {
+		t.Fatalf("esperaba %d herramientas, obtuve %d", len(expected), len(list))
+	}
+	for i, name := range expected {
+		if list[i].Name != name {
+			t.Errorf("herramienta %d: esperaba %q, obtuve %q", i, name, list[i].Name)
+		}
+	}
+}
+
+func TestSearchIngredients_ResolvesNameToID(t *testing.T) {
+	// El caso que motivó esta herramienta: el usuario dice "queso", las demás herramientas
+	// exigen el identificador "cheese".
+	r := newTestRegistry(t)
+	result, errObj := r.Call("search_ingredients", json.RawMessage(`{"name":"queso"}`))
+	if errObj != nil {
+		t.Fatalf("no esperaba error: %v", errObj)
+	}
+
+	body, _ := json.Marshal(result.StructuredContent)
+	var parsed struct {
+		Ingredients []ingredientSummary `json:"ingredients"`
+	}
+	json.Unmarshal(body, &parsed)
+
+	if len(parsed.Ingredients) != 1 || parsed.Ingredients[0].ID != "cheese" {
+		t.Fatalf("esperaba encontrar solo cheese, obtuve %+v", parsed.Ingredients)
+	}
+	if parsed.Ingredients[0].AvailableQuantity != 40 || parsed.Ingredients[0].BaseUnit != "g" {
+		t.Errorf("existencia o unidad inesperadas: %+v", parsed.Ingredients[0])
+	}
+}
+
+func TestSearchIngredients_EmptyNameReturnsAllInStableOrder(t *testing.T) {
+	r := newTestRegistry(t)
+	first, _ := r.Call("search_ingredients", json.RawMessage(`{"name":""}`))
+	second, _ := r.Call("search_ingredients", json.RawMessage(`{"name":""}`))
+
+	a, _ := json.Marshal(first.StructuredContent)
+	b, _ := json.Marshal(second.StructuredContent)
+	if string(a) != string(b) {
+		t.Errorf("el orden debe ser estable entre llamadas:\n%s\n%s", a, b)
 	}
 }
 
@@ -34,7 +85,7 @@ func TestCall_UnknownTool_IsProtocolError(t *testing.T) {
 
 func TestSearchDishes_FindsByPartialName(t *testing.T) {
 	r := newTestRegistry(t)
-	result, errObj := r.Call("search_dishes", json.RawMessage(`{"name":"burger"}`))
+	result, errObj := r.Call("search_dishes", json.RawMessage(`{"name":"hamburguesa"}`))
 	if errObj != nil {
 		t.Fatalf("no esperaba error: %v", errObj)
 	}
@@ -104,12 +155,12 @@ func TestGetRecipeDetails_IncludesAllergens(t *testing.T) {
 
 	foundNuts := false
 	for _, ing := range parsed.Ingredients {
-		if ing.IngredientID == "walnuts" && ing.AllergenCategory == "nuts" {
+		if ing.IngredientID == "walnuts" && ing.AllergenCategory == "frutos secos" {
 			foundNuts = true
 		}
 	}
 	if !foundNuts {
-		t.Errorf("esperaba encontrar walnuts con allergenCategory=nuts, obtuve %+v", parsed.Ingredients)
+		t.Errorf("esperaba encontrar walnuts con allergenCategory=\"frutos secos\", obtuve %+v", parsed.Ingredients)
 	}
 }
 
@@ -211,5 +262,33 @@ func TestAdjustInventory_MissingIdempotencyKey_IsProtocolError(t *testing.T) {
 	))
 	if errObj == nil {
 		t.Fatal("esperaba error de protocolo por idempotencyKey ausente")
+	}
+}
+
+func TestGetDishAvailability_DishWithoutRecipeIsNotAvailable(t *testing.T) {
+	// Un platillo sin receta registrada no produce ingredientes faltantes. Antes eso bastaba
+	// para reportar available:true junto a maximumServings:0, una contradicción que el LLM
+	// le habría transmitido al usuario como "sí hay".
+	repo := storage.NewInMemoryRepository()
+	repo.Seed()
+	repo.AddDish(domain.Dish{ID: "sin-receta", Name: "Platillo sin receta", Active: true})
+
+	r := NewRegistry(repo)
+	RegisterRestaurantTools(r)
+
+	result, errObj := r.Call("get_dish_availability", json.RawMessage(`{"dishId":"sin-receta","servings":1}`))
+	if errObj != nil {
+		t.Fatalf("no esperaba error de protocolo: %v", errObj)
+	}
+
+	body, _ := json.Marshal(result.StructuredContent)
+	var parsed dishAvailabilityResult
+	json.Unmarshal(body, &parsed)
+
+	if parsed.Available {
+		t.Errorf("un platillo sin receta no debe reportarse como disponible: %+v", parsed)
+	}
+	if parsed.MaximumServings != 0 {
+		t.Errorf("esperaba maximumServings=0, obtuve %d", parsed.MaximumServings)
 	}
 }
