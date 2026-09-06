@@ -18,6 +18,8 @@ type ErrorObject struct {
 	Data    any    `json:"data,omitempty"`
 }
 
+// Error implementa la interfaz error, para que un *ErrorObject pueda propagarse
+// como cualquier otro error de Go sin perder el código JSON-RPC original.
 func (e *ErrorObject) Error() string {
 	return fmt.Sprintf("jsonrpc error %d: %s", e.Code, e.Message)
 }

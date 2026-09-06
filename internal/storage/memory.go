@@ -11,6 +11,9 @@ import (
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/domain"
 )
 
+// InMemoryRepository es la implementación de Repository que guarda todo en mapas.
+// No persiste nada: existe para que las pruebas corran rápido y sin tocar el disco.
+// El servidor real usa SQLiteRepository.
 type InMemoryRepository struct {
 	mu sync.Mutex
 
@@ -42,6 +45,7 @@ func (r *InMemoryRepository) AddDish(d domain.Dish) {
 	r.dishes[d.ID] = d
 }
 
+// FindDish busca un platillo por su identificador exacto.
 func (r *InMemoryRepository) FindDish(id string) (domain.Dish, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -49,6 +53,8 @@ func (r *InMemoryRepository) FindDish(id string) (domain.Dish, bool) {
 	return d, ok
 }
 
+// SearchDishes devuelve los platillos cuyo nombre contenga query, sin distinguir
+// mayúsculas. Un query vacío devuelve todos.
 func (r *InMemoryRepository) SearchDishes(query string) []domain.Dish {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -63,6 +69,8 @@ func (r *InMemoryRepository) SearchDishes(query string) []domain.Dish {
 	return results
 }
 
+// RecipeForDish devuelve los ingredientes de un platillo. El booleano distingue
+// "el platillo no existe" de "existe pero no tiene receta cargada".
 func (r *InMemoryRepository) RecipeForDish(dishID string) ([]domain.RecipeItem, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -72,6 +80,7 @@ func (r *InMemoryRepository) RecipeForDish(dishID string) ([]domain.RecipeItem, 
 	return r.recipes[dishID], true
 }
 
+// Ingredient busca un ingrediente por su identificador exacto.
 func (r *InMemoryRepository) Ingredient(id string) (domain.Ingredient, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -96,6 +105,9 @@ func (r *InMemoryRepository) SearchIngredients(query string) []domain.Ingredient
 	return results
 }
 
+// InventoryQuantity devuelve la existencia actual en la unidad base del ingrediente.
+// El booleano indica si el ingrediente existe, no si tiene existencia: un ingrediente
+// conocido sin movimientos devuelve (0, true).
 func (r *InMemoryRepository) InventoryQuantity(ingredientID string) (int64, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

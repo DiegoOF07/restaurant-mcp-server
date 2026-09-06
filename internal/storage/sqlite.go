@@ -200,6 +200,7 @@ func (r *SQLiteRepository) AddDish(d domain.Dish) error {
 	return err
 }
 
+// FindDish busca un platillo por su identificador exacto.
 func (r *SQLiteRepository) FindDish(id string) (domain.Dish, bool) {
 	var d domain.Dish
 	var active int
@@ -213,6 +214,8 @@ func (r *SQLiteRepository) FindDish(id string) (domain.Dish, bool) {
 	return d, true
 }
 
+// SearchDishes devuelve los platillos cuyo nombre contenga query, sin distinguir
+// mayúsculas, ordenados por identificador para que la salida sea estable.
 func (r *SQLiteRepository) SearchDishes(query string) []domain.Dish {
 	q := strings.ToLower(strings.TrimSpace(query))
 	rows, err := r.db.Query(
@@ -238,6 +241,9 @@ func (r *SQLiteRepository) SearchDishes(query string) []domain.Dish {
 	return results
 }
 
+// RecipeForDish devuelve los ingredientes de un platillo en el orden en que se
+// cargaron. El booleano distingue "el platillo no existe" de "existe pero no
+// tiene receta cargada".
 func (r *SQLiteRepository) RecipeForDish(dishID string) ([]domain.RecipeItem, bool) {
 	if _, ok := r.FindDish(dishID); !ok {
 		return nil, false
@@ -263,6 +269,7 @@ func (r *SQLiteRepository) RecipeForDish(dishID string) ([]domain.RecipeItem, bo
 	return items, true
 }
 
+// Ingredient busca un ingrediente por su identificador exacto.
 func (r *SQLiteRepository) Ingredient(id string) (domain.Ingredient, bool) {
 	var ing domain.Ingredient
 	var baseUnit string
@@ -276,6 +283,8 @@ func (r *SQLiteRepository) Ingredient(id string) (domain.Ingredient, bool) {
 	return ing, true
 }
 
+// SearchIngredients busca por nombre o por identificador, sin distinguir mayúsculas,
+// ordenando por identificador. Un query vacío devuelve todos.
 func (r *SQLiteRepository) SearchIngredients(query string) []domain.Ingredient {
 	q := strings.ToLower(strings.TrimSpace(query))
 	rows, err := r.db.Query(
@@ -301,6 +310,9 @@ func (r *SQLiteRepository) SearchIngredients(query string) []domain.Ingredient {
 	return results
 }
 
+// InventoryQuantity devuelve la existencia actual en la unidad base del ingrediente.
+// El booleano indica si el ingrediente existe, no si tiene existencia: un ingrediente
+// sembrado pero sin fila de inventario devuelve (0, true).
 func (r *SQLiteRepository) InventoryQuantity(ingredientID string) (int64, bool) {
 	if _, ok := r.Ingredient(ingredientID); !ok {
 		return 0, false

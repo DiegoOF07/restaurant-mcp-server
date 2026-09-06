@@ -125,6 +125,8 @@ func (l *Lifecycle) handlePing(_ json.RawMessage) (any, *jsonrpc.ErrorObject) {
 	return struct{}{}, nil
 }
 
+// Ready indica si el handshake MCP terminó: hubo un initialize y además llegó la
+// notificación notifications/initialized. Hasta entonces tools/* debe rechazarse.
 func (l *Lifecycle) Ready() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -1,61 +1,68 @@
 # restaurant-mcp-server
 
-Servidor **MCP (Model Context Protocol)** para gestión de recetas e inventario de un
-restaurante, escrito en Go **desde cero y sin ningún SDK de MCP**: los mensajes JSON-RPC 2.0
-se parsean, despachan y serializan a mano.
+A **Model Context Protocol (MCP)** server for restaurant recipe and inventory management,
+written in Go **from scratch with no MCP SDK**: JSON-RPC 2.0 messages are parsed, dispatched
+and serialized by hand.
 
-Expone cinco herramientas que un asistente conversacional puede invocar para consultar el
-menú, calcular disponibilidad real a partir del inventario, revisar alérgenos y registrar
-ajustes de inventario auditados.
+It exposes five tools that a conversational assistant can invoke to browse the menu, compute
+real availability from current stock, check allergens, and record audited inventory
+adjustments.
 
-> Proyecto académico — CC3067 Redes, Universidad del Valle de Guatemala.
-
----
-
-## Índice
-
-- [Por qué existe](#por-qué-existe)
-- [Requisitos](#requisitos)
-- [Compilación](#compilación)
-- [Ejecución](#ejecución)
-- [Herramientas expuestas](#herramientas-expuestas)
-- [Control de acceso por roles](#control-de-acceso-por-roles)
-- [Persistencia](#persistencia)
-- [Protocolo MCP](#protocolo-mcp)
-- [Casos de uso](#casos-de-uso)
-- [Datos de demostración](#datos-de-demostración)
-- [Estructura del proyecto](#estructura-del-proyecto)
-- [Pruebas](#pruebas)
-- [Consideraciones de seguridad](#consideraciones-de-seguridad)
-- [Licencia](#licencia)
+> Academic project — CC3067 Redes, Universidad del Valle de Guatemala.
+>
+> 🇪🇸 *Versión en español: [README.es.md](./README.es.md)*
+>
+> Note: the server's user-facing strings (tool descriptions and error messages) are in
+> **Spanish** by design — the assistant is built for a Spanish-speaking restaurant. This
+> document is in English.
 
 ---
 
-## Por qué existe
+## Table of contents
 
-Un modelo de lenguaje no debe *calcular* cuántas porciones quedan ni *recordar* qué lleva un
-platillo: se equivoca y no hay forma de auditarlo. Este servidor mueve esas decisiones al
-dominio, donde sí se pueden probar.
-
-El modelo decide **qué preguntar**; el servidor decide **cuál es la respuesta**. Por eso las
-herramientas devuelven datos estructurados y no prosa, y por eso la descripción de
-`get_dish_availability` dice explícitamente *«úsala siempre en vez de calcular tú mismo»*.
-
----
-
-## Requisitos
-
-- **Go 1.25 o superior.**
-
-  El mínimo lo impone `modernc.org/sqlite`, el driver de SQLite escrito íntegramente en Go.
-  Si tu `go version` es menor, con `GOTOOLCHAIN=auto` (el valor por defecto) Go descarga la
-  cadena de herramientas necesaria automáticamente.
-
-No hace falta compilador de C ni ninguna biblioteca del sistema.
+- [Why it exists](#why-it-exists)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Running it](#running-it)
+- [Implemented features](#implemented-features)
+- [Tools](#tools)
+- [Role-based access control](#role-based-access-control)
+- [Persistence](#persistence)
+- [MCP protocol](#mcp-protocol)
+- [Usage examples](#usage-examples)
+- [Demo data](#demo-data)
+- [Project layout](#project-layout)
+- [Testing](#testing)
+- [Security considerations](#security-considerations)
+- [License](#license)
 
 ---
 
-## Compilación
+## Why it exists
+
+A language model should not *compute* how many servings are left, nor *remember* what goes
+into a dish: it gets those wrong, and there is no way to audit it. This server moves those
+decisions into a domain layer where they can actually be tested.
+
+The model decides **what to ask**; the server decides **what the answer is**. That is why the
+tools return structured data rather than prose, and why the description of
+`get_dish_availability` explicitly says *"always use this instead of computing it yourself."*
+
+---
+
+## Requirements
+
+- **Go 1.25 or newer.**
+
+  The minimum is imposed by `modernc.org/sqlite`, the SQLite driver written entirely in Go.
+  If your `go version` is older, `GOTOOLCHAIN=auto` (the default) downloads the required
+  toolchain automatically.
+
+No C compiler and no system libraries are needed.
+
+---
+
+## Installation
 
 ```bash
 git clone https://github.com/DiegoOF07/restaurant-mcp-server.git
@@ -63,76 +70,94 @@ cd restaurant-mcp-server
 go build -o bin/restaurant-mcp-server ./cmd/stdio
 ```
 
-### Compilación cruzada
+### Cross-compiling
 
-El driver de SQLite es Go puro, así que con `CGO_ENABLED=0` el binario sale **estático** y se
-puede compilar para cualquier plataforma desde cualquier otra:
+The SQLite driver is pure Go, so with `CGO_ENABLED=0` the binary is **statically linked** and
+can be built for any platform from any other:
 
 ```bash
-# Windows, desde Linux o WSL
+# Windows, from Linux or WSL
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o bin/restaurant-mcp-server.exe ./cmd/stdio
 
 # macOS Apple Silicon
 GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -o bin/restaurant-mcp-server-macos ./cmd/stdio
 ```
 
-El binario resultante ronda los 10 MB y no depende de nada instalado en la máquina destino:
-se copia y funciona.
+The resulting binary is around 10 MB and depends on nothing installed on the target machine:
+copy it and it runs.
 
-> **Si usas WSL**, compila y ejecuta el cliente en el **mismo** entorno. Un binario ELF
-> compilado dentro de WSL no puede ejecutarse desde el `node.exe` de Windows aunque ambos vean
-> el mismo disco: son dos sistemas operativos distintos. Ese es el origen del clásico error
-> `spawn ENOENT (-4058)`.
+> **If you use WSL**, build and run the client in the **same** environment. An ELF binary built
+> inside WSL cannot be launched by Windows' `node.exe`, even though both see the same disk:
+> they are two different operating systems. This is the usual cause of the classic
+> `spawn ENOENT (-4058)` error.
 
 ---
 
-## Ejecución
+## Running it
 
-El servidor habla **stdio**: un mensaje JSON-RPC por línea en `stdin`, las respuestas en
-`stdout`, y **todo** el diagnóstico en `stderr`.
+The server speaks **stdio**: one JSON-RPC message per line on `stdin`, responses on `stdout`,
+and **all** diagnostics on `stderr`.
 
 ```bash
-./bin/restaurant-mcp-server                      # base junto al binario
-./bin/restaurant-mcp-server --db /ruta/datos.db  # base en otra ubicación
-./bin/restaurant-mcp-server --db :memory:        # sin persistencia (efímero)
+./bin/restaurant-mcp-server                      # database next to the binary
+./bin/restaurant-mcp-server --db /path/data.db   # database elsewhere
+./bin/restaurant-mcp-server --db :memory:        # no persistence (ephemeral)
 ```
 
-Normalmente no se lanza a mano: lo lanza un host MCP como subproceso. Con el cliente de este
-proyecto basta declararlo en `apps/cli/mcp.servers.json`.
+You normally don't launch it by hand: an MCP host launches it as a subprocess. With this
+project's client, just declare it in `apps/cli/mcp.servers.json`.
 
-### Variables de entorno
+### Environment variables
 
-| Variable | Valores | Por defecto | Para qué |
+| Variable | Values | Default | Purpose |
 |---|---|---|---|
-| `MCP_USER_ROLE` | `waiter`, `cook`, `admin` | `waiter` | Rol bajo el que opera la conexión |
-| `MCP_USER_ID` | texto libre | `unspecified` | Queda registrado en cada movimiento de inventario |
-| `MCP_DB_PATH` | ruta o `:memory:` | `restaurant.db` junto al binario | Ubicación de la base |
+| `MCP_USER_ROLE` | `waiter`, `cook`, `admin` | `waiter` | Role the connection operates under |
+| `MCP_USER_ID` | free text | `unspecified` | Recorded on every inventory movement |
+| `MCP_DB_PATH` | path or `:memory:` | `restaurant.db` next to the binary | Database location |
 
-La bandera `--db` tiene prioridad sobre `MCP_DB_PATH`.
+The `--db` flag takes precedence over `MCP_DB_PATH`.
 
 ---
 
-## Herramientas expuestas
+## Implemented features
 
-| Herramienta | Rol requerido | Qué hace |
+- **JSON-RPC 2.0** parsing, dispatch and error handling, written from scratch and independent
+  of the transport. Standard error codes (`-32700` … `-32603`).
+- **MCP lifecycle**: `initialize` with **version negotiation**, `notifications/initialized`,
+  `ping`. `tools/*` is rejected until the handshake completes.
+- **stdio transport**: one message per line; `stdout` carries protocol traffic only.
+- **Five tools** with declared JSON Schemas, returning both human-readable text and structured
+  content.
+- **Role-based access control**, enforced server-side and failing closed.
+- **SQLite persistence** through a pure-Go driver, with atomic transactions, idempotency and
+  non-negative stock enforced as schema constraints.
+- **Auditable inventory movements**: every adjustment records who performed it, why, and the
+  quantities before and after.
+- **Unit conversion** (`kg`→`g`, `l`→`ml`) with integer base units, so no floating-point error
+  ever accumulates in stock levels.
+
+---
+
+## Tools
+
+| Tool | Required role | What it does |
 |---|---|---|
-| `search_dishes` | cualquiera | Busca platillos del menú por nombre (coincidencia parcial). Nombre vacío = todos. |
-| `search_ingredients` | cualquiera | Busca ingredientes por nombre o identificador; devuelve unidad base, alérgeno y existencia actual. |
-| `get_dish_availability` | cualquiera | Calcula cuántas porciones se pueden preparar **ahora** con el inventario real. |
-| `get_recipe_details` | cualquiera | Ingredientes, cantidades por porción y alérgenos de un platillo. |
-| `adjust_inventory` | `cook` o `admin` | Registra una pérdida, daño o corrección. Idempotente y auditada. |
+| `search_dishes` | any | Finds menu dishes by name (partial, case-insensitive). Empty name returns all. |
+| `search_ingredients` | any | Finds ingredients by name or ID; returns base unit, allergen and current stock. |
+| `get_dish_availability` | any | Computes how many servings can be prepared **right now** from real stock. |
+| `get_recipe_details` | any | Ingredients, per-serving quantities and allergens for a dish. |
+| `adjust_inventory` | `cook` or `admin` | Records a loss, damage or correction. Idempotent and audited. |
 
-### `search_ingredients` es el puente entre el lenguaje y los identificadores
+### `search_ingredients` bridges language and identifiers
 
-El usuario dice *«descuenta dos kilos de queso»*, pero las herramientas exigen
-`ingredientId: "cheese"`. Sin una forma de traducir un nombre a un identificador, el asistente
-tendría que adivinarlo — y adivinar identificadores es exactamente lo que no queremos. Esta
-herramienta cierra ese hueco, y de paso devuelve la unidad base para que el asistente no
-confunda gramos con unidades.
+A user says *"subtract two kilos of cheese"*, but the tools require `ingredientId: "cheese"`.
+Without a way to translate a name into an identifier, the assistant would have to guess one —
+and guessing identifiers is exactly what we want to avoid. This tool closes that gap, and
+returns the base unit so the assistant doesn't confuse grams with pieces.
 
-### `get_dish_availability` responde con el cuello de botella
+### `get_dish_availability` answers with the bottleneck
 
-No devuelve un número suelto, sino qué ingrediente limita la producción:
+It doesn't return a bare number, but which ingredient limits production:
 
 ```json
 {
@@ -145,41 +170,42 @@ No devuelve un número suelto, sino qué ingrediente limita la producción:
 }
 ```
 
-Así el asistente puede decir *«no alcanza, faltan 120 g de queso»* en lugar de un simple «no».
+That lets the assistant say *"not enough — you're 120 g of cheese short"* rather than a flat no.
 
-### `adjust_inventory` es la única operación que escribe
+### `adjust_inventory` is the only write operation
 
-Tiene tres protecciones, cada una en una capa distinta:
+It has three safeguards, each at a different layer:
 
-1. **`idempotencyKey` obligatoria.** Repetir la llamada con la misma clave devuelve el
-   movimiento original y **no** vuelve a descontar. Sobrevive a reinicios del servidor.
-2. **Restricción de rol** (ver abajo), validada en el servidor.
-3. **Confirmación del usuario**, que es responsabilidad del host. Es una capa *adicional*, no
-   un sustituto: un cliente modificado podría saltársela, y por eso el permiso se valida acá.
+1. **A mandatory `idempotencyKey`.** Repeating the call with the same key returns the original
+   movement and does **not** subtract again. This survives server restarts.
+2. **A role restriction** (see below), enforced by the server.
+3. **User confirmation**, which is the host's responsibility. That is an *additional* layer,
+   not a substitute: a modified client could skip it, which is precisely why the permission is
+   checked here.
 
 ---
 
-## Control de acceso por roles
+## Role-based access control
 
-Tres roles, con permisos crecientes:
+Three roles with increasing privileges:
 
-| Rol | Puede leer | Puede ajustar inventario |
+| Role | Can read | Can adjust inventory |
 |---|---|---|
 | `waiter` | ✅ | ❌ |
 | `cook` | ✅ | ✅ |
 | `admin` | ✅ | ✅ |
 
-**El permiso se valida en el servidor**, en `Registry.Call()`, antes de llegar al handler. Que
-la interfaz también pregunte «¿confirmas?» es una capa distinta: el host es código cliente, y
-un cliente distinto podría no aplicar ninguna restricción.
+**Permissions are enforced on the server**, in `Registry.Call()`, before the handler runs. The
+interface also asking "are you sure?" is a separate layer: the host is client code, and a
+different client might apply no restrictions at all.
 
-**Falla cerrado.** Sin `MCP_USER_ROLE`, o con un valor no reconocido, la conexión se queda en
-`waiter` (solo lectura) y se deja constancia en `stderr`. Un rol desconocido nunca escala a uno
-con más permisos.
+**It fails closed.** With no `MCP_USER_ROLE`, or an unrecognized value, the connection stays at
+`waiter` (read-only) and the fallback is logged to `stderr`. An unknown role never escalates to
+one with more privileges.
 
-Una denegación se devuelve como **error de negocio** (`isError: true`), no como error de
-protocolo JSON-RPC. Así el asistente puede explicárselo al usuario en lenguaje natural
-(«pedíselo a alguien de cocina») en lugar de que el host reviente con una excepción.
+A denial is returned as a **business error** (`isError: true`), not a JSON-RPC protocol error.
+That way the assistant can explain it to the user in natural language ("ask someone from the
+kitchen") instead of the host blowing up with an exception.
 
 ```
 el rol "waiter" no está autorizado para ejecutar "adjust_inventory";
@@ -188,199 +214,196 @@ se requiere uno de: cook, admin
 
 ---
 
-## Persistencia
+## Persistence
 
-El inventario se guarda en **SQLite**, en un único archivo que se puede copiar, respaldar o
-inspeccionar con cualquier cliente estándar.
+Inventory is stored in **SQLite**, in a single file you can copy, back up, or inspect with any
+standard client.
 
-**Dónde vive la base.** Por defecto, `restaurant.db` **junto al binario** — no en el directorio
-de trabajo. Es deliberado: el servidor lo lanza el host como subproceso y hereda un `cwd` que
-depende de desde dónde se ejecutó el cliente. Con una ruta relativa al `cwd`, el mismo comando
-abriría bases distintas según desde dónde se invoque, y el inventario «se perdería» sin
-explicación.
+**Where the database lives.** By default, `restaurant.db` **next to the binary** — not in the
+working directory. This is deliberate: the server is launched as a subprocess by the host and
+inherits whatever `cwd` the client had. With a path relative to `cwd`, the same command would
+open different databases depending on where it was invoked from, and inventory would appear to
+"vanish" with no explanation.
 
-**Siembra automática.** Una base vacía se llena con el catálogo de demostración. Una base que
-ya tiene datos se respeta tal cual: reiniciar el servidor no borra el trabajo del turno.
+**Automatic seeding.** An empty database is populated with the demo catalog. A database that
+already holds data is left alone: restarting the server does not wipe the shift's work.
 
-### Las invariantes viven en el esquema, no sólo en el código
+### Invariants live in the schema, not only in the code
 
 ```sql
 idempotency_key    TEXT NOT NULL UNIQUE,
 resulting_quantity INTEGER NOT NULL CHECK (resulting_quantity >= 0)
 ```
 
-El doble descuento y el inventario negativo los bloquea el motor, no un `if` en Go. Si algún
-día alguien escribe en la base por otra vía, las reglas siguen puestas. Cada ajuste ocurre
-dentro de una transacción: leer la existencia, escribirla y registrar el movimiento son una
-sola operación atómica.
+Double subtraction and negative stock are blocked by the engine, not by an `if` in Go. If
+someone ever writes to the database through another path, the rules still hold. Each adjustment
+runs inside a transaction: reading stock, writing it back and recording the movement are a
+single atomic operation.
 
-### Por qué `modernc.org/sqlite` y no `mattn/go-sqlite3`
+### Why `modernc.org/sqlite` and not `mattn/go-sqlite3`
 
-El driver clásico necesita **cgo**, lo que obligaría a tener un toolchain de C en cada máquina
-y haría imposible compilar para Windows desde Linux. Con el driver en Go puro el servidor sigue
-siendo un único ejecutable estático. El costo es tamaño: el binario pasa de ~3 MB a ~10 MB.
-Para un proyecto cuyo objetivo declarado es la portabilidad, es un intercambio claro.
+The classic driver requires **cgo**, which would demand a C toolchain on every machine and make
+it impossible to build for Windows from Linux. With the pure-Go driver the server remains a
+single static executable. The cost is size: the binary grows from ~3 MB to ~10 MB. For a
+project whose stated goal is portability, that is a clear trade.
 
 ---
 
-## Protocolo MCP
+## MCP protocol
 
-Versión implementada: **`2025-06-18`**.
+Implemented version: **`2025-06-18`**.
 
-### Negociación de versión
+### Version negotiation
 
-Ante un `initialize` con una versión distinta, el servidor **no falla**: responde con una
-versión que sí soporta y deja que el cliente decida si continúa o se desconecta, tal como
-exige la especificación.
+Given an `initialize` request with a different version, the server **does not fail**: it
+responds with a version it does support and lets the client decide whether to continue or
+disconnect, as the specification requires.
 
 ```jsonc
-// petición
+// request
 {"protocolVersion": "2099-01-01", ...}
-// respuesta — sin error
+// response — no error
 {"protocolVersion": "2025-06-18", ...}
 ```
 
-### Métodos implementados
+### Implemented methods
 
-| Método | Tipo | Notas |
+| Method | Type | Notes |
 |---|---|---|
-| `initialize` | petición | Negocia versión y anuncia capacidades |
-| `notifications/initialized` | notificación | Cierra el handshake; hasta recibirla, `tools/*` se rechaza |
-| `ping` | petición | Comprobación de vida |
-| `tools/list` | petición | Devuelve las cinco herramientas con su JSON Schema |
-| `tools/call` | petición | Ejecuta una herramienta |
-
-Se usan los códigos de error estándar de JSON-RPC (`-32700` a `-32603`).
+| `initialize` | request | Negotiates the version and advertises capabilities |
+| `notifications/initialized` | notification | Completes the handshake; until it arrives, `tools/*` is rejected |
+| `ping` | request | Liveness check |
+| `tools/list` | request | Returns the five tools with their JSON Schemas |
+| `tools/call` | request | Executes a tool |
 
 ---
 
-## Casos de uso
+## Usage examples
 
-### 1. Verificar disponibilidad antes de aceptar un pedido
+### 1. Check availability before accepting an order
 
-> **Mesero:** «¿Puedo vender dos hamburguesas especiales?»
+> **Waiter:** "Can I sell two special burgers?"
 
-El asistente llama a `get_dish_availability` con `servings: 2`. Sólo hay 40 g de queso y cada
-porción lleva 80 g, así que la respuesta es `maximumServings: 0` y señala el queso como cuello
-de botella. El mesero se entera **antes** de comprometerse con el cliente.
+The assistant calls `get_dish_availability` with `servings: 2`. There are only 40 g of cheese
+and each serving takes 80 g, so the answer is `maximumServings: 0`, with cheese flagged as the
+bottleneck. The waiter finds out **before** committing to the customer.
 
-### 2. Responder una consulta de alérgenos sin inventar
+### 2. Answer an allergen question without inventing anything
 
-> **Mesero:** «¿El pastel de chocolate lleva algo con gluten?»
+> **Waiter:** "Does the chocolate cake contain gluten?"
 
-`get_recipe_details` devuelve los alérgenos **registrados** de cada ingrediente. El asistente
-tiene prohibido deducirlos por su cuenta: en una pregunta sobre alergias, una respuesta
-inventada es un riesgo real para el comensal.
+`get_recipe_details` returns each ingredient's **recorded** allergens. The assistant is
+forbidden from inferring them: on an allergy question, a made-up answer is a real risk to the
+diner.
 
-### 3. Registrar una pérdida de inventario
+### 3. Record an inventory loss
 
-> **Cocinero:** «Se cayó una bandeja, descuenta 10 gramos de queso.»
+> **Cook:** "A tray dropped — subtract 10 grams of cheese."
 
-El asistente resuelve `queso → cheese` con `search_ingredients`, el host pide confirmación y
-`adjust_inventory` aplica el descuento con una `idempotencyKey` única. Si la red falla y el
-cliente reintenta, la clave repetida devuelve el movimiento original **sin volver a descontar**.
+The assistant resolves `queso → cheese` via `search_ingredients`, the host asks for
+confirmation, and `adjust_inventory` applies the change with a unique `idempotencyKey`. If the
+connection drops and the client retries, the repeated key returns the original movement
+**without subtracting again**.
 
-### 4. El mismo intento, con el rol equivocado
+### 4. The same attempt, with the wrong role
 
-> **Mesero:** «Descuenta 10 gramos de queso.»
+> **Waiter:** "Subtract 10 grams of cheese."
 
-El host pregunta y el mesero confirma — pero el servidor deniega igual, porque `waiter` no
-tiene permiso. La confirmación del usuario no otorga permisos.
+The host asks and the waiter confirms — but the server denies it anyway, because `waiter` has
+no permission. User confirmation does not grant privileges.
 
-### Probarlo a mano, sin cliente
+### Trying it by hand, without a client
 
 ```bash
 {
-  echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"prueba","version":"1"}}}'
+  echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}'
   echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
   echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_dish_availability","arguments":{"dishId":"special-burger","servings":2}}}'
 } | MCP_USER_ROLE=cook ./bin/restaurant-mcp-server --db :memory:
 ```
 
-`notifications/initialized` no es opcional: sin ella, `tools/call` se rechaza con
+`notifications/initialized` is not optional: without it, `tools/call` is rejected with
 `-32600 Invalid Request`.
 
 ---
 
-## Datos de demostración
+## Demo data
 
-Una base nueva se siembra con dos platillos y ocho ingredientes.
+A fresh database is seeded with two dishes and eight ingredients.
 
-**Platillos**
+**Dishes**
 
-| ID | Nombre | Receta (por porción) |
+| ID | Name | Recipe (per serving) |
 |---|---|---|
-| `special-burger` | Hamburguesa Especial | 1 pan, 1 carne, 80 g queso, 20 g lechuga |
-| `chocolate-cake` | Pastel de Chocolate | 150 g harina, 100 g chocolate, 50 ml leche, 20 g nueces |
+| `special-burger` | Hamburguesa Especial | 1 bun, 1 patty, 80 g cheese, 20 g lettuce |
+| `chocolate-cake` | Pastel de Chocolate | 150 g flour, 100 g chocolate, 50 ml milk, 20 g walnuts |
 
-**Ingredientes e inventario inicial**
+**Ingredients and starting stock**
 
-| ID | Nombre | Unidad base | Alérgeno | Existencia |
+| ID | Name | Base unit | Allergen | Stock |
 |---|---|---|---|---|
-| `cheese` | Queso cheddar | g | lácteos | **40** |
+| `cheese` | Queso cheddar | g | dairy | **40** |
 | `bun` | Pan de hamburguesa | unit | gluten | 10 |
 | `patty` | Carne de res | unit | — | 10 |
 | `lettuce` | Lechuga | g | — | 500 |
 | `flour` | Harina de trigo | g | gluten | 2000 |
-| `chocolate` | Chocolate amargo | g | lácteos | 1000 |
-| `milk` | Leche entera | ml | lácteos | 2000 |
-| `walnuts` | Nueces | g | frutos secos | 200 |
+| `chocolate` | Chocolate amargo | g | dairy | 1000 |
+| `milk` | Leche entera | ml | dairy | 2000 |
+| `walnuts` | Nueces | g | tree nuts | 200 |
 
-El queso está deliberadamente bajo: con 40 g alcanza para **una** hamburguesa pero no para dos.
-Es el escenario que hace visible que la disponibilidad se calcula de verdad.
+Cheese is deliberately low: 40 g is enough for **one** burger but not two. That is the scenario
+that makes it visible that availability is genuinely computed.
 
-**Unidades.** Todo se almacena en la unidad base del ingrediente (`g`, `ml` o `unit`) como
-entero. Las herramientas aceptan `kg` y `l` y convierten al recibirlas, así que nunca se acumula
-error de punto flotante en el inventario.
+**Units.** Everything is stored in the ingredient's base unit (`g`, `ml` or `unit`) as an
+integer. Tools accept `kg` and `l` and convert on the way in, so floating-point error never
+accumulates in stock levels.
 
 ---
 
-## Estructura del proyecto
+## Project layout
 
 ```
-cmd/stdio/          Punto de entrada: bucle stdio y selección de la base
+cmd/stdio/          Entry point: stdio loop and database selection
 internal/
-  domain/           Modelo de negocio, roles, unidades y errores. Sin dependencias externas.
-  jsonrpc/          Parseo, despacho y errores de JSON-RPC 2.0. No sabe nada de MCP.
-  mcp/              Ciclo de vida MCP y adaptación de tools/* al registro.
-  storage/          Repository (interfaz) + implementaciones en memoria y en SQLite.
-  tools/            Las cinco herramientas, sus esquemas y el control de roles.
+  domain/           Business model, roles, units and errors. No external dependencies.
+  jsonrpc/          JSON-RPC 2.0 parsing, dispatch and errors. Knows nothing about MCP.
+  mcp/              MCP lifecycle and adaptation of tools/* to the registry.
+  storage/          Repository interface + in-memory and SQLite implementations.
+  tools/            The five tools, their schemas and role enforcement.
 ```
 
-Las capas dependen sólo hacia adentro: `jsonrpc` no sabe qué es MCP y `domain` no sabe que
-existe una base de datos. `storage.Repository` es lo que permite que las pruebas rápidas corran
-en memoria y el servidor real use SQLite sin que ninguna herramienta se entere.
+Dependencies point inward only: `jsonrpc` doesn't know what MCP is, and `domain` doesn't know a
+database exists. `storage.Repository` is what lets fast tests run in memory while the real
+server uses SQLite, without any tool noticing the difference.
 
 ---
 
-## Pruebas
+## Testing
 
 ```bash
 go vet ./...
 go test ./...
 ```
 
-Las pruebas de comportamiento del repositorio corren **contra las dos implementaciones** con los
-mismos casos. Eso es lo que hace que probar en memoria por rapidez siga diciendo algo cierto
-sobre el SQLite que corre en producción; si una implementación se desvía, el mismo caso pasa en
-una y falla en la otra.
+The repository's behavioral tests run **against both implementations** with the same cases.
+That is what keeps the fast in-memory tests meaningful about the SQLite that runs in
+production; if one implementation drifts, the same case passes in one and fails in the other.
 
 ---
 
-## Consideraciones de seguridad
+## Security considerations
 
-- El servidor **nunca** escribe en `stdout` algo que no sea un mensaje JSON-RPC. Cualquier otra
-  cosa corrompería el flujo del protocolo. Todo el diagnóstico va a `stderr`.
-- Los campos `data` de los errores no filtran trazas de pila, SQL ni credenciales.
-- Los permisos se validan en el servidor, no en el cliente.
-- Las entradas se validan contra el JSON Schema declarado de cada herramienta antes de tocar el
-  dominio.
-- Todas las consultas usan parámetros ligados; no se construye SQL concatenando texto.
-- El archivo de base de datos hereda los permisos del sistema de archivos: si llegara a contener
-  datos reales, protégelo como cualquier otro archivo con información del negocio.
+- The server **never** writes anything to `stdout` other than JSON-RPC messages. Anything else
+  would corrupt the protocol stream. All diagnostics go to `stderr`.
+- Error `data` fields never leak stack traces, SQL, or credentials.
+- Permissions are enforced on the server, not the client.
+- Inputs are validated against each tool's declared JSON Schema before reaching the domain.
+- All queries use bound parameters; SQL is never built by string concatenation.
+- The database file inherits filesystem permissions: if it ever holds real data, protect it
+  like any other file containing business information.
 
 ---
 
-## Licencia
+## License
 
-MIT — ver [LICENSE](./LICENSE).
+MIT — see [LICENSE](./LICENSE).
