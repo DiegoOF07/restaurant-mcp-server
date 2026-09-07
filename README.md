@@ -118,6 +118,9 @@ project's client, just declare it in `apps/cli/mcp.servers.json`.
 | `MCP_AUTH_TOKENS` | `token:role:user,...` | — | Credentials for HTTP. Required to listen on a public address |
 | `MCP_ALLOWED_ORIGINS` | URLs, comma-separated | — | Browser origins allowed over HTTP |
 
+Run `restaurant-mcp-server --help` for the full list of flags and environment variables, and
+`--version` to check which build you have.
+
 The `--db` flag takes precedence over `MCP_DB_PATH`.
 
 ---
@@ -334,6 +337,19 @@ that sends five different role headers and confirms the waiter still gets denied
 **The server refuses to start** on a network-reachable address with no credentials
 configured. A misconfigured deployment fails on the first attempt instead of quietly serving
 your inventory to the internet. `--insecure` overrides this, for local experiments only.
+
+
+### Operational hardening
+
+| | |
+|---|---|
+| **Graceful shutdown** | `SIGTERM` and `SIGINT` stop accepting new connections and give in-flight requests up to 10 s to finish. A redeploy therefore never cuts an inventory adjustment mid-write, and the port is free immediately for the next instance. |
+| **Rate limiting** | A token bucket per client IP: `--rate-limit` requests/second (default 20) with `--rate-burst` allowed back-to-back (default 40). Over the limit gets `429` with `Retry-After`. `--rate-limit 0` disables it. |
+| **Behind a proxy** | `--trust-proxy` reads the client IP from `X-Forwarded-For`. Needed on Fly/Railway, where otherwise every request looks like it comes from the proxy and one client would rate-limit everyone. Off by default: that header is written by the client and forging it would bypass the limit. |
+
+The limiter keys on IP rather than token on purpose: it also has to protect the
+authentication step itself. Keyed by token, someone trying credentials blindly would never
+spend any quota — which is exactly the case worth slowing down.
 
 ### Other protections
 

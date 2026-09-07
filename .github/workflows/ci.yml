@@ -178,12 +178,81 @@ jobs:
       - name: Refuses to expose the network without credentials
         run: |
           set -uo pipefail
-          if ./bin/restaurant-mcp-server --http 0.0.0.0:8766 --db :memory: 2>&1 | grep -q "sin ninguna credencial"; then
-            echo "El servidor se negó a arrancar, como debe"
-          else
+
+          # La salida se captura ANTES de inspeccionarla. Con `binario | grep` y pipefail, el
+          # estado de la tubería sería el del binario (1, porque se niega a arrancar) y la
+          # comprobación se leería al revés: el comportamiento correcto parecería un fallo.
+          output=$(./bin/restaurant-mcp-server --http 0.0.0.0:8766 --db :memory: 2>&1) && status=0 || status=$?
+          echo "$output"
+
+          if [ "$status" -eq 0 ]; then
             echo "FALLO: arrancó expuesto y sin autenticación"
             exit 1
           fi
+          # Además de fallar, debe hacerlo POR ESTE motivo y no por otro cualquiera.
+          echo "$output" | grep -q "sin ninguna credencial" || {
+            echo "FALLO: no arrancó, pero por un motivo distinto al esperado"; exit 1; }
+
+          echo "El servidor se negó a arrancar, como debe (exit $status)"
+
+      # Un redespliegue manda SIGTERM. Si el proceso muriera de golpe, las peticiones en
+      # vuelo se cortarían y el puerto podría quedar tomado para la instancia siguiente.
+      - name: Graceful shutdown on SIGTERM
+        run: |
+          set -euo pipefail
+
+          MCP_AUTH_TOKENS="tok:cook:ana" \
+            ./bin/restaurant-mcp-server --http 127.0.0.1:8767 --db :memory: &
+          server_pid=$!
+
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8767/health > /dev/null && break
+            sleep 0.3
+          done
+
+          kill -TERM "$server_pid"
+          wait "$server_pid" && status=0 || status=$?
+          [ "$status" -eq 0 ] || { echo "FALLO: salió con $status tras SIGTERM"; exit 1; }
+
+          # El puerto debe quedar libre de inmediato para la instancia nueva.
+          MCP_AUTH_TOKENS="tok:cook:ana" \
+            ./bin/restaurant-mcp-server --http 127.0.0.1:8767 --db :memory: &
+          second_pid=$!
+          trap 'kill $second_pid 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8767/health > /dev/null && break
+            sleep 0.3
+          done
+          curl -sf http://127.0.0.1:8767/health > /dev/null \
+            || { echo "FALLO: el puerto no quedó libre tras el cierre"; exit 1; }
+
+          echo "Apagado ordenado OK"
+
+      - name: Rate limiting rejects a flood with 429
+        run: |
+          set -euo pipefail
+
+          MCP_AUTH_TOKENS="tok:cook:ana" \
+            ./bin/restaurant-mcp-server --http 127.0.0.1:8768 --db :memory: \
+            --rate-limit 2 --rate-burst 3 &
+          server_pid=$!
+          trap 'kill $server_pid 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8768/health > /dev/null && break
+            sleep 0.3
+          done
+
+          saw_429=0
+          for _ in $(seq 1 15); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8768/mcp \
+              -H 'Content-Type: application/json' -H 'Authorization: Bearer tok' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"ping"}')
+            if [ "$code" = "429" ]; then saw_429=1; break; fi
+          done
+
+          [ "$saw_429" -eq 1 ] || { echo "FALLO: una avalancha no fue limitada"; exit 1; }
+          echo "Límite de peticiones OK"
 
       # El servidor sólo puede escribir mensajes JSON-RPC en stdout: cualquier otra cosa
       # corrompe el flujo del protocolo para el cliente que lo lee línea por línea.

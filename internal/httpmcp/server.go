@@ -1,16 +1,10 @@
 // Package httpmcp expone el servidor MCP por HTTP, siguiendo el transporte
 // "Streamable HTTP" de la especificación 2025-06-18.
-//
-// Alcance implementado: POST con respuestas JSON, sesiones con cabecera Mcp-Session-Id,
-// DELETE para terminar una sesión, validación de Origin y autenticación por token.
-//
-// Alcance deliberadamente NO implementado: el flujo SSE servidor -> cliente (GET). La
-// especificación lo permite: un servidor que nunca inicia mensajes por su cuenta puede
-// responder 405 a GET. Este servidor declara listChanged:false y no tiene notificaciones
-// que empujar, así que un canal permanente abierto no transportaría nada.
+
 package httpmcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -55,7 +50,17 @@ type Config struct {
 	Fallback auth.Principal
 	// AllowedOrigins son los orígenes de navegador aceptados. Vacío = ninguno.
 	AllowedOrigins []string
-	Logger         *log.Logger
+
+	// RateLimit es el ritmo sostenido de peticiones por segundo y por cliente.
+	// 0 o menos desactiva el límite.
+	RateLimit float64
+	// RateBurst es cuántas peticiones seguidas se toleran antes de aplicar el ritmo.
+	RateBurst float64
+	// TrustProxy hace que la IP del cliente se lea de X-Forwarded-For. Actívalo SÓLO si hay
+	// un proxy de confianza delante: la cabecera la escribe el cliente y es falsificable.
+	TrustProxy bool
+
+	Logger *log.Logger
 }
 
 // Server es el servidor MCP sobre HTTP.
@@ -64,6 +69,7 @@ type Server struct {
 	logger   *log.Logger
 	mu       sync.Mutex
 	sessions map[string]*session
+	limiter  *rateLimiter
 	http     *http.Server
 }
 
@@ -93,6 +99,7 @@ func New(config Config) (*Server, error) {
 		config:   config,
 		logger:   config.Logger,
 		sessions: make(map[string]*session),
+		limiter:  newRateLimiter(config.RateLimit, config.RateBurst),
 	}
 
 	mux := http.NewServeMux()
@@ -111,17 +118,30 @@ func New(config Config) (*Server, error) {
 	return s, nil
 }
 
-// ListenAndServe arranca el servidor y no retorna hasta que se cierra.
+// ListenAndServe arranca el servidor y no retorna hasta que se cierra. Un apagado ordenado
+// devuelve http.ErrServerClosed, que el llamador debe tratar como final normal.
 func (s *Server) ListenAndServe() error {
 	stop := s.startReaper()
 	defer close(stop)
 
 	s.logger.Printf("escuchando en http://%s%s", s.config.Addr, s.config.Path)
+	if s.limiter != nil {
+		s.logger.Printf("límite de peticiones: %.0f/s por cliente (ráfaga %.0f)", s.config.RateLimit, s.config.RateBurst)
+	} else {
+		s.logger.Printf("límite de peticiones desactivado")
+	}
 	return s.http.ListenAndServe()
 }
 
-// Close apaga el servidor sin cortar peticiones en vuelo.
+// Close corta el servidor de inmediato, sin esperar a las peticiones en vuelo.
+// Para un apagado ordenado usa Shutdown.
 func (s *Server) Close() error { return s.http.Close() }
+
+// Shutdown deja de aceptar conexiones nuevas y espera a que terminen las peticiones que ya
+// estaban siendo atendidas, hasta que el contexto se cancele
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.http.Shutdown(ctx)
+}
 
 // Handler expone el enrutador, para poder probarlo sin abrir un puerto.
 func (s *Server) Handler() http.Handler { return s.http.Handler }
@@ -138,6 +158,7 @@ func (s *Server) startReaper() chan struct{} {
 				return
 			case <-ticker.C:
 				s.reapExpired()
+				s.limiter.cleanup(sessionTTL)
 			}
 		}
 	}()
@@ -177,6 +198,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+	if allowed, wait := s.limiter.Allow(clientKey(r, s.config.TrustProxy)); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		http.Error(w, "demasiadas peticiones; espera un momento", http.StatusTooManyRequests)
+		return
+	}
+
 	// Se valida ANTES de mirar credenciales: un navegador en una página hostil ya lleva
 	// las cookies del usuario, así que rechazar por origen es la primera barrera.
 	if !s.originAllowed(r) {

@@ -36,3 +36,6 @@ go.work.sum
 *.db
 *.db-wal
 *.db-shm
+
+# Binarios de distribución generados por "make release"
+/dist/

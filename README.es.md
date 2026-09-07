@@ -113,6 +113,9 @@ proyecto basta declararlo en `apps/cli/mcp.servers.json`.
 | `MCP_AUTH_TOKENS` | `token:rol:usuario,...` | — | Credenciales para HTTP. Obligatorias para escuchar en una dirección pública |
 | `MCP_ALLOWED_ORIGINS` | URLs separadas por coma | — | Orígenes de navegador permitidos por HTTP |
 
+Con `restaurant-mcp-server --help` se ve la lista completa de banderas y variables de entorno,
+y con `--version`, qué compilación tienes.
+
 La bandera `--db` tiene prioridad sobre `MCP_DB_PATH`.
 
 ---
@@ -315,6 +318,19 @@ denegando.
 credenciales configuradas. Así un despliegue mal configurado falla en el primer intento en
 vez de servir el inventario a internet en silencio. `--insecure` lo permite igualmente, sólo
 para pruebas locales.
+
+
+### Robustez operativa
+
+| | |
+|---|---|
+| **Apagado ordenado** | `SIGTERM` y `SIGINT` dejan de aceptar conexiones nuevas y dan hasta 10 s a las peticiones en curso. Así un redespliegue nunca corta un ajuste de inventario a media escritura, y el puerto queda libre de inmediato para la instancia siguiente. |
+| **Límite de peticiones** | Cubeta de fichas por IP: `--rate-limit` peticiones por segundo (20 por defecto) con `--rate-burst` seguidas toleradas (40). Pasarse devuelve `429` con `Retry-After`. `--rate-limit 0` lo desactiva. |
+| **Detrás de un proxy** | `--trust-proxy` lee la IP del cliente de `X-Forwarded-For`. Hace falta en Fly o Railway, donde si no todas las peticiones parecen venir del proxy y un solo cliente limitaría a todos. Desactivado por defecto: esa cabecera la escribe el cliente y falsificarla saltaría el límite. |
+
+El límite se aplica por IP y no por token a propósito: también tiene que proteger el propio
+proceso de autenticación. Con el token como clave, alguien probando credenciales a ciegas no
+gastaría cupo — que es justo el caso que conviene frenar.
 
 ### Otras protecciones
 

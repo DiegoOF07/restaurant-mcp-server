@@ -1,4 +1,4 @@
-// Command server expone el servidor MCP del restaurante por stdio (por defecto) o por HTTP.
+// Command server expone el servidor MCP del restaurante por stdio o por HTTP.
 //
 // Ambos transportes comparten exactamente el mismo dominio, las mismas herramientas y el
 // mismo control de roles: lo único que cambia es cómo entran y salen los bytes.
@@ -6,13 +6,19 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/auth"
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/domain"
@@ -22,7 +28,9 @@ import (
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/storage"
 )
 
-var serverInfo = mcp.ServerInfo{Name: "restaurant-mcp-server", Version: "0.2.0"}
+var serverInfo = mcp.ServerInfo{Name: "restaurant-mcp-server", Version: "0.3.0"}
+
+const shutdownGrace = 10 * time.Second
 
 func main() {
 	dbPath := flag.String("db", "", "ruta del archivo SQLite (por defecto restaurant.db junto al binario; usa :memory: para no persistir)")
@@ -30,7 +38,17 @@ func main() {
 	httpPath := flag.String("path", "/mcp", "ruta del endpoint MCP cuando se sirve por HTTP")
 	origins := flag.String("origins", "", "orígenes de navegador permitidos, separados por coma (vacío = ninguno)")
 	insecure := flag.Bool("insecure", false, "permite escuchar en una dirección pública SIN autenticación. Sólo para pruebas")
+	rateLimit := flag.Float64("rate-limit", 20, "peticiones por segundo permitidas a cada cliente (0 desactiva el límite)")
+	rateBurst := flag.Float64("rate-burst", 40, "peticiones seguidas toleradas antes de aplicar el ritmo")
+	trustProxy := flag.Bool("trust-proxy", false, "lee la IP del cliente de X-Forwarded-For. Actívalo SÓLO si hay un proxy de confianza delante")
+	showVersion := flag.Bool("version", false, "muestra la versión y termina")
+	flag.Usage = usage
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("%s %s (protocolo MCP %s)\n", serverInfo.Name, serverInfo.Version, mcp.ProtocolVersion)
+		return
+	}
 
 	logger := log.New(os.Stderr, "[restaurant-mcp-server] ", log.LstdFlags)
 
@@ -49,7 +67,16 @@ func main() {
 	}
 
 	if addr != "" {
-		if err := runHTTP(repo, addr, *httpPath, *origins, *insecure, role, userID, logger); err != nil {
+		opts := httpOptions{
+			addr:       addr,
+			path:       *httpPath,
+			rawOrigins: *origins,
+			insecure:   *insecure,
+			rateLimit:  *rateLimit,
+			rateBurst:  *rateBurst,
+			trustProxy: *trustProxy,
+		}
+		if err := runHTTP(repo, opts, role, userID, logger); err != nil {
 			logger.Fatalf("fallo del servidor HTTP: %v", err)
 		}
 		return
@@ -68,15 +95,26 @@ func runStdio(repo storage.Repository, role domain.Role, userID string, logger *
 	}
 }
 
+// httpOptions agrupa las banderas del modo HTTP, para no arrastrar ocho parámetros sueltos.
+type httpOptions struct {
+	addr       string
+	path       string
+	rawOrigins string
+	insecure   bool
+	rateLimit  float64
+	rateBurst  float64
+	trustProxy bool
+}
+
 // runHTTP atiende muchas conexiones concurrentes, cada una con su propia sesión MCP.
 func runHTTP(
 	repo storage.Repository,
-	addr, path, rawOrigins string,
-	insecure bool,
+	opts httpOptions,
 	fallbackRole domain.Role,
 	fallbackUser string,
 	logger *log.Logger,
 ) error {
+	addr, path, rawOrigins, insecure := opts.addr, opts.path, opts.rawOrigins, opts.insecure
 	tokens, err := auth.ParseTokens(os.Getenv("MCP_AUTH_TOKENS"))
 	if err != nil {
 		return fmt.Errorf("MCP_AUTH_TOKENS: %w", err)
@@ -90,9 +128,6 @@ func runHTTP(
 		return fmt.Errorf("orígenes permitidos: %w", err)
 	}
 
-	// Escuchar en una dirección pública sin credenciales entrega el inventario a cualquiera
-	// que alcance el puerto. Se falla al arrancar en vez de servir algo inseguro: un
-	// despliegue mal configurado debe notarse en el primer intento, no en producción.
 	if !httpmcp.IsLoopback(addr) && tokens.Empty() && !insecure {
 		return fmt.Errorf(
 			"te dispones a escuchar en %q, que es alcanzable desde la red, sin ninguna credencial.\n"+
@@ -121,23 +156,100 @@ func runHTTP(
 		Tokens:         tokens,
 		Fallback:       auth.Principal{Role: fallbackRole, UserID: fallbackUser},
 		AllowedOrigins: allowedOrigins,
+		RateLimit:      opts.rateLimit,
+		RateBurst:      opts.rateBurst,
+		TrustProxy:     opts.trustProxy,
 		Logger:         logger,
 	})
 	if err != nil {
 		return err
 	}
 
-	return server.ListenAndServe()
+	return serveUntilSignal(server, logger)
 }
 
-// openRepository resuelve dónde vive la base y la deja lista para usar.
-//
-// Precedencia: la bandera --db, luego MCP_DB_PATH, y si ninguna está, un archivo
-// restaurant.db JUNTO AL BINARIO. Anclarlo al ejecutable y no al directorio de trabajo es
-// deliberado: con stdio el servidor lo lanza el host como subproceso, y el cwd que herede
-// depende de desde dónde se ejecutó el CLI. Con una ruta relativa al cwd, el mismo comando
-// abriría bases distintas según desde dónde se invoque, y el inventario "se perdería" sin
-// explicación.
+func serveUntilSignal(server *httpmcp.Server, logger *log.Logger) error {
+	// El canal se prepara ANTES de arrancar: si la señal llegara mientras el servidor sube,
+	// registrarse después la perdería y el proceso moriría sin apagarse bien.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
+	errs := make(chan error, 1)
+	go func() {
+
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errs <- err
+			return
+		}
+		errs <- nil
+	}()
+
+	select {
+	case err := <-errs:
+		return err
+
+	case sig := <-signals:
+		logger.Printf("señal %s recibida; cerrando (hasta %s para las peticiones en curso)", sig, shutdownGrace)
+
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+
+		if err := server.Shutdown(ctx); err != nil {
+			logger.Printf("el cierre ordenado no terminó a tiempo: %v", err)
+			return server.Close()
+		}
+
+		logger.Printf("cerrado correctamente")
+		return nil
+	}
+}
+
+// usage documenta también las variables de entorno
+func usage() {
+	out := flag.CommandLine.Output()
+	fmt.Fprintf(out, `%s %s — servidor MCP de recetas e inventario (protocolo %s)
+
+USO
+  %s [banderas]
+
+  Sin --http habla MCP por stdio: un mensaje JSON-RPC por línea en stdin,
+  las respuestas en stdout y el diagnóstico en stderr.
+
+BANDERAS
+`, serverInfo.Name, serverInfo.Version, mcp.ProtocolVersion, os.Args[0])
+
+	flag.PrintDefaults()
+
+	fmt.Fprintf(out, `
+VARIABLES DE ENTORNO
+  MCP_USER_ROLE        waiter | cook | admin. Rol de la conexión con stdio.
+                       Por defecto waiter (solo lectura): sin cook o admin,
+                       adjust_inventory se deniega.
+  MCP_USER_ID          Queda registrado en cada movimiento de inventario.
+  MCP_DB_PATH          Ruta de la base. Por defecto restaurant.db junto al
+                       binario. Usa :memory: para no dejar archivos.
+  MCP_HTTP_ADDR        Equivalente a --http.
+  MCP_AUTH_TOKENS      Credenciales del modo HTTP, con el formato
+                       "token:rol:usuario,token:rol:usuario". Obligatorias
+                       para escuchar en una dirección alcanzable por red:
+                       por HTTP el rol se deriva del token, nunca de una
+                       cabecera que el cliente pueda elegir.
+  MCP_ALLOWED_ORIGINS  Orígenes de navegador permitidos, separados por coma.
+
+EJEMPLOS
+  # Local, por stdio, con permiso para ajustar inventario
+  MCP_USER_ROLE=cook %s
+
+  # Remoto, por HTTP, con dos credenciales
+  MCP_AUTH_TOKENS="tokenA:admin:diego,tokenB:waiter:ana" %s --http 0.0.0.0:8080
+
+  # Comprobar que responde
+  curl http://127.0.0.1:8080/health
+`, os.Args[0], os.Args[0])
+}
+
+// openRepository resuelve dónde vive la base y la deja lista para usar
 func openRepository(flagPath string, logger *log.Logger) (*storage.SQLiteRepository, error) {
 	path := flagPath
 	if path == "" {
@@ -161,8 +273,7 @@ func openRepository(flagPath string, logger *log.Logger) (*storage.SQLiteReposit
 		repo.Close()
 		return nil, fmt.Errorf("no se pudo inspeccionar la base: %w", err)
 	}
-	// Sólo se siembra una base vacía. En una ya usada, resembrar reescribiría el catálogo
-	// y confundiría cualquier ajuste de inventario previo.
+
 	if empty {
 		if err := repo.Seed(); err != nil {
 			repo.Close()
@@ -176,9 +287,6 @@ func openRepository(flagPath string, logger *log.Logger) (*storage.SQLiteReposit
 	return repo, nil
 }
 
-// identityFromEnv lee el rol y el usuario de las variables de entorno.
-// Un rol desconocido NO cae a uno con más permisos: se degrada al menos privilegiado
-// y se deja constancia en stderr.
 func identityFromEnv(logger *log.Logger) (domain.Role, string) {
 	userID := os.Getenv("MCP_USER_ID")
 	if userID == "" {
