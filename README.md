@@ -8,13 +8,11 @@ It exposes five tools that a conversational assistant can invoke to browse the m
 real availability from current stock, check allergens, and record audited inventory
 adjustments.
 
-> Academic project — CC3067 Redes, Universidad del Valle de Guatemala.
->
+
 > 🇪🇸 *Versión en español: [README.es.md](./README.es.md)*
 >
 > Note: the server's user-facing strings (tool descriptions and error messages) are in
-> **Spanish** by design — the assistant is built for a Spanish-speaking restaurant. This
-> document is in English.
+> **Spanish** by design.
 
 ---
 
@@ -29,6 +27,8 @@ adjustments.
 - [Role-based access control](#role-based-access-control)
 - [Persistence](#persistence)
 - [MCP protocol](#mcp-protocol)
+- [Transports](#transports)
+- [Docker](#docker)
 - [Usage examples](#usage-examples)
 - [Demo data](#demo-data)
 - [Project layout](#project-layout)
@@ -67,7 +67,7 @@ No C compiler and no system libraries are needed.
 ```bash
 git clone https://github.com/DiegoOF07/restaurant-mcp-server.git
 cd restaurant-mcp-server
-go build -o bin/restaurant-mcp-server ./cmd/stdio
+go build -o bin/restaurant-mcp-server ./cmd/server
 ```
 
 ### Cross-compiling
@@ -77,10 +77,10 @@ can be built for any platform from any other:
 
 ```bash
 # Windows, from Linux or WSL
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o bin/restaurant-mcp-server.exe ./cmd/stdio
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o bin/restaurant-mcp-server.exe ./cmd/server
 
 # macOS Apple Silicon
-GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -o bin/restaurant-mcp-server-macos ./cmd/stdio
+GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -o bin/restaurant-mcp-server-macos ./cmd/server
 ```
 
 The resulting binary is around 10 MB and depends on nothing installed on the target machine:
@@ -114,6 +114,9 @@ project's client, just declare it in `apps/cli/mcp.servers.json`.
 | `MCP_USER_ROLE` | `waiter`, `cook`, `admin` | `waiter` | Role the connection operates under |
 | `MCP_USER_ID` | free text | `unspecified` | Recorded on every inventory movement |
 | `MCP_DB_PATH` | path or `:memory:` | `restaurant.db` next to the binary | Database location |
+| `MCP_HTTP_ADDR` | `host:port` | — | Serve over HTTP instead of stdio |
+| `MCP_AUTH_TOKENS` | `token:role:user,...` | — | Credentials for HTTP. Required to listen on a public address |
+| `MCP_ALLOWED_ORIGINS` | URLs, comma-separated | — | Browser origins allowed over HTTP |
 
 The `--db` flag takes precedence over `MCP_DB_PATH`.
 
@@ -276,6 +279,98 @@ disconnect, as the specification requires.
 | `tools/list` | request | Returns the five tools with their JSON Schemas |
 | `tools/call` | request | Executes a tool |
 
+
+---
+
+## Transports
+
+The same server, the same domain and the same role enforcement, reachable two ways.
+
+| | **stdio** (default) | **HTTP** (`--http`) |
+|---|---|---|
+| How it runs | The host spawns it as a subprocess | It runs on its own; clients connect to it |
+| Who can reach it | Only whoever launched it | Anyone who can reach the port |
+| Sessions | One per process | Many at once, each isolated |
+| Identity comes from | `MCP_USER_ROLE` env var | The bearer token |
+| Best for | Local development, a desktop client | Sharing with classmates, deployment |
+
+```bash
+./bin/restaurant-mcp-server                              # stdio
+./bin/restaurant-mcp-server --http 127.0.0.1:8080        # HTTP, local only
+```
+
+### The HTTP transport
+
+It implements MCP's **Streamable HTTP** transport (2025-06-18):
+
+| Method | Behaviour |
+|---|---|
+| `POST /mcp` | One JSON-RPC message per request. Requests get `200` with the response; notifications get `202` with no body. |
+| `DELETE /mcp` | Ends the session and frees its state. |
+| `GET /mcp` | `405`. The spec allows a server with no server-initiated messages to skip the SSE stream, and this one declares `listChanged: false`. |
+| `GET /health` | Liveness check for deployment platforms. Not part of MCP. |
+
+The `initialize` response carries an `Mcp-Session-Id` header; every later request must repeat
+it. An unknown or expired session gets `404`, which the spec defines as "re-initialize" — not
+"retry". Sessions expire after 30 minutes idle.
+
+JSON-RPC **batching is rejected**: version 2025-06-18 removed it.
+
+### Why the role comes from the token, not a header
+
+Over stdio, the server is a subprocess launched by the user, so trusting `MCP_USER_ROLE` is
+reasonable — whoever can set the variable could already run the binary.
+
+Over HTTP that reasoning collapses. Anyone who reaches the port could send
+`X-Role: admin` and promote themselves. So each token is bound to a role up front:
+
+```bash
+MCP_AUTH_TOKENS="unTokenLargo:admin:diego,otroToken:waiter:ana"
+```
+
+The role is whatever the token says. Headers claiming otherwise are ignored — there is a test
+that sends five different role headers and confirms the waiter still gets denied.
+
+**The server refuses to start** on a network-reachable address with no credentials
+configured. A misconfigured deployment fails on the first attempt instead of quietly serving
+your inventory to the internet. `--insecure` overrides this, for local experiments only.
+
+### Other protections
+
+- **`Origin` validation** against DNS rebinding, which is what turns a "localhost only"
+  server into something any web page can drive. Allowed origins are opt-in via
+  `--origins` / `MCP_ALLOWED_ORIGINS`; a request with no `Origin` is not a browser and is
+  judged by its token instead.
+- **Session ownership**: a session belongs to the identity that created it. Knowing a session
+  id is not enough to borrow someone else's permissions (`403`).
+- **Session ids from `crypto/rand`** (128 bits), because an id is effectively a credential.
+- **4 MiB body cap**, so a huge payload cannot exhaust memory.
+
+---
+
+## Docker
+
+```bash
+docker build -t restaurant-mcp .
+
+docker run -d -p 127.0.0.1:8080:8080 \
+  -e MCP_AUTH_TOKENS="unTokenLargoYAleatorio:admin:diego" \
+  -v restaurant-data:/data \
+  restaurant-mcp
+```
+
+Or with Compose:
+
+```bash
+MCP_AUTH_TOKENS="unTokenLargoYAleatorio:admin:diego" docker compose up --build
+```
+
+The image is **12 MB** and contains the binary and nothing else: it is built on
+`distroless/static`, which has no shell, no package manager, not even libc. It runs as
+**nonroot**, and the database lives on a volume so redeploying does not wipe the inventory.
+
+Being a static binary is what makes that possible — there is no runtime to install.
+
 ---
 
 ## Usage examples
@@ -363,12 +458,14 @@ accumulates in stock levels.
 ## Project layout
 
 ```
-cmd/stdio/          Entry point: stdio loop and database selection
+cmd/server/         Entry point: transport selection, database and identity
 internal/
   domain/           Business model, roles, units and errors. No external dependencies.
   jsonrpc/          JSON-RPC 2.0 parsing, dispatch and errors. Knows nothing about MCP.
   mcp/              MCP lifecycle and adaptation of tools/* to the registry.
   storage/          Repository interface + in-memory and SQLite implementations.
+  auth/             Token -> identity, for remote connections.
+  httpmcp/          Streamable HTTP transport: sessions, auth and Origin checks.
   tools/            The five tools, their schemas and role enforcement.
 ```
 

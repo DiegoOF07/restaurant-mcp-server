@@ -1,0 +1,27 @@
+# Levanta el servidor MCP por HTTP con persistencia. Uso:
+#   MCP_AUTH_TOKENS="unTokenLargoYAleatorio:admin:diego" docker compose up --build
+services:
+  restaurant-mcp:
+    build: .
+    ports:
+      # Sólo 127.0.0.1: el contenedor queda accesible desde esta máquina, no desde la red.
+      # Para exponerlo de verdad, cambia a "8080:8080" y asegúrate de tener tokens puestos.
+      - "127.0.0.1:8080:8080"
+    environment:
+      # Sin esto el servidor se niega a arrancar, porque dentro del contenedor escucha en
+      # 0.0.0.0 y eso no es una dirección local.
+      MCP_AUTH_TOKENS: ${MCP_AUTH_TOKENS:?define MCP_AUTH_TOKENS="token:rol:usuario"}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
+    volumes:
+      # El inventario sobrevive a "docker compose down" y a reconstruir la imagen.
+      - restaurant-data:/data
+    restart: unless-stopped
+    healthcheck:
+      # La imagen distroless no tiene shell ni curl, así que se usa el propio binario.
+      test: ["CMD", "/usr/local/bin/restaurant-mcp-server", "--help"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  restaurant-data:

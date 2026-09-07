@@ -8,9 +8,7 @@ Expone cinco herramientas que un asistente conversacional puede invocar para con
 menú, calcular disponibilidad real a partir del inventario, revisar alérgenos y registrar
 ajustes de inventario auditados.
 
-> Proyecto académico — CC3067 Redes, Universidad del Valle de Guatemala.
->
-> 🇬🇧 *English version (the one required by the course): [README.md](./README.md)*
+> 🇬🇧 *English version: [README.md](./README.md)*
 
 ---
 
@@ -24,6 +22,8 @@ ajustes de inventario auditados.
 - [Control de acceso por roles](#control-de-acceso-por-roles)
 - [Persistencia](#persistencia)
 - [Protocolo MCP](#protocolo-mcp)
+- [Transportes](#transportes)
+- [Docker](#docker)
 - [Casos de uso](#casos-de-uso)
 - [Datos de demostración](#datos-de-demostración)
 - [Estructura del proyecto](#estructura-del-proyecto)
@@ -62,7 +62,7 @@ No hace falta compilador de C ni ninguna biblioteca del sistema.
 ```bash
 git clone https://github.com/DiegoOF07/restaurant-mcp-server.git
 cd restaurant-mcp-server
-go build -o bin/restaurant-mcp-server ./cmd/stdio
+go build -o bin/restaurant-mcp-server ./cmd/server
 ```
 
 ### Compilación cruzada
@@ -72,10 +72,10 @@ puede compilar para cualquier plataforma desde cualquier otra:
 
 ```bash
 # Windows, desde Linux o WSL
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o bin/restaurant-mcp-server.exe ./cmd/stdio
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o bin/restaurant-mcp-server.exe ./cmd/server
 
 # macOS Apple Silicon
-GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -o bin/restaurant-mcp-server-macos ./cmd/stdio
+GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -o bin/restaurant-mcp-server-macos ./cmd/server
 ```
 
 El binario resultante ronda los 10 MB y no depende de nada instalado en la máquina destino:
@@ -109,6 +109,9 @@ proyecto basta declararlo en `apps/cli/mcp.servers.json`.
 | `MCP_USER_ROLE` | `waiter`, `cook`, `admin` | `waiter` | Rol bajo el que opera la conexión |
 | `MCP_USER_ID` | texto libre | `unspecified` | Queda registrado en cada movimiento de inventario |
 | `MCP_DB_PATH` | ruta o `:memory:` | `restaurant.db` junto al binario | Ubicación de la base |
+| `MCP_HTTP_ADDR` | `host:puerto` | — | Servir por HTTP en vez de stdio |
+| `MCP_AUTH_TOKENS` | `token:rol:usuario,...` | — | Credenciales para HTTP. Obligatorias para escuchar en una dirección pública |
+| `MCP_ALLOWED_ORIGINS` | URLs separadas por coma | — | Orígenes de navegador permitidos por HTTP |
 
 La bandera `--db` tiene prioridad sobre `MCP_DB_PATH`.
 
@@ -254,6 +257,102 @@ exige la especificación.
 
 Se usan los códigos de error estándar de JSON-RPC (`-32700` a `-32603`).
 
+
+---
+
+## Transportes
+
+El mismo servidor, el mismo dominio y el mismo control de roles, alcanzable de dos formas.
+
+| | **stdio** (por defecto) | **HTTP** (`--http`) |
+|---|---|---|
+| Cómo corre | El host lo lanza como subproceso | Corre por su cuenta; los clientes se conectan |
+| Quién lo alcanza | Sólo quien lo lanzó | Cualquiera que llegue al puerto |
+| Sesiones | Una por proceso | Muchas a la vez, aisladas entre sí |
+| La identidad sale de | La variable `MCP_USER_ROLE` | El token |
+| Sirve para | Desarrollo local, un cliente de escritorio | Compartir con compañeros, desplegar |
+
+```bash
+./bin/restaurant-mcp-server                              # stdio
+./bin/restaurant-mcp-server --http 127.0.0.1:8080        # HTTP, sólo local
+```
+
+### El transporte HTTP
+
+Implementa el transporte **Streamable HTTP** de MCP (2025-06-18):
+
+| Método | Comportamiento |
+|---|---|
+| `POST /mcp` | Un mensaje JSON-RPC por petición. Las solicitudes reciben `200` con la respuesta; las notificaciones, `202` sin cuerpo. |
+| `DELETE /mcp` | Termina la sesión y libera su estado. |
+| `GET /mcp` | `405`. La especificación permite omitir el flujo SSE a un servidor que no inicia mensajes, y éste declara `listChanged: false`. |
+| `GET /health` | Comprobación de vida para plataformas de despliegue. No es parte de MCP. |
+
+La respuesta de `initialize` trae la cabecera `Mcp-Session-Id`; toda petición posterior debe
+repetirla. Una sesión desconocida o caducada recibe `404`, que la especificación define como
+«vuelve a inicializar», no como «reintenta». Las sesiones caducan a los 30 minutos de
+inactividad.
+
+Los **lotes de JSON-RPC se rechazan**: la versión 2025-06-18 los eliminó.
+
+### Por qué el rol viene del token y no de una cabecera
+
+Con stdio el servidor es un subproceso que lanza el propio usuario, así que confiar en
+`MCP_USER_ROLE` es razonable: quien puede fijar la variable ya podía ejecutar el binario.
+
+Por HTTP ese razonamiento se cae. Cualquiera que alcance el puerto podría mandar
+`X-Role: admin` y ascenderse solo. Por eso cada token queda ligado a un rol de antemano:
+
+```bash
+MCP_AUTH_TOKENS="unTokenLargo:admin:diego,otroToken:waiter:ana"
+```
+
+El rol es el que dice el token. Las cabeceras que afirmen otra cosa se ignoran — hay una
+prueba que manda cinco cabeceras de rol distintas y confirma que al mesero se le sigue
+denegando.
+
+**El servidor se niega a arrancar** en una dirección alcanzable por red si no hay
+credenciales configuradas. Así un despliegue mal configurado falla en el primer intento en
+vez de servir el inventario a internet en silencio. `--insecure` lo permite igualmente, sólo
+para pruebas locales.
+
+### Otras protecciones
+
+- **Validación de `Origin`** contra DNS rebinding, que es el ataque que convierte un servidor
+  «sólo localhost» en algo que cualquier página web puede manejar. Los orígenes se habilitan
+  con `--origins` / `MCP_ALLOWED_ORIGINS`; una petición sin `Origin` no viene de un navegador
+  y se juzga por su token.
+- **La sesión pertenece a quien la creó**: conocer su identificador no basta para usar los
+  permisos de otro (`403`).
+- **Identificadores de sesión con `crypto/rand`** (128 bits), porque un identificador de
+  sesión es, de hecho, una credencial.
+- **Tope de 4 MiB** en el cuerpo, para que un JSON enorme no agote la memoria.
+
+---
+
+## Docker
+
+```bash
+docker build -t restaurant-mcp .
+
+docker run -d -p 127.0.0.1:8080:8080 \
+  -e MCP_AUTH_TOKENS="unTokenLargoYAleatorio:admin:diego" \
+  -v restaurant-data:/data \
+  restaurant-mcp
+```
+
+O con Compose:
+
+```bash
+MCP_AUTH_TOKENS="unTokenLargoYAleatorio:admin:diego" docker compose up --build
+```
+
+La imagen pesa **12 MB** y contiene el binario y nada más: se construye sobre
+`distroless/static`, que no trae shell, ni gestor de paquetes, ni siquiera libc. Corre como
+**nonroot**, y la base vive en un volumen para que redesplegar no borre el inventario.
+
+Que el binario sea estático es lo que hace todo esto posible: no hay runtime que instalar.
+
 ---
 
 ## Casos de uso
@@ -340,12 +439,14 @@ error de punto flotante en el inventario.
 ## Estructura del proyecto
 
 ```
-cmd/stdio/          Punto de entrada: bucle stdio y selección de la base
+cmd/server/         Punto de entrada: elección de transporte, base e identidad
 internal/
   domain/           Modelo de negocio, roles, unidades y errores. Sin dependencias externas.
   jsonrpc/          Parseo, despacho y errores de JSON-RPC 2.0. No sabe nada de MCP.
   mcp/              Ciclo de vida MCP y adaptación de tools/* al registro.
   storage/          Repository (interfaz) + implementaciones en memoria y en SQLite.
+  auth/             Token -> identidad, para conexiones remotas.
+  httpmcp/          Transporte Streamable HTTP: sesiones, autenticación y Origin.
   tools/            Las cinco herramientas, sus esquemas y el control de roles.
 ```
 

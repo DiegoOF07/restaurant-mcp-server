@@ -1,0 +1,16 @@
+# Todo lo que no hace falta para compilar. Reduce el contexto que se envía al daemon y,
+# sobre todo, evita meter una base de datos local o un binario ajeno dentro de la imagen.
+.git
+.github
+bin/
+*.db
+*.db-wal
+*.db-shm
+*.exe
+docs/
+testdata/
+README*.md
+LICENSE
+Dockerfile
+.dockerignore
+docker-compose.yml

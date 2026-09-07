@@ -19,18 +19,17 @@ jobs:
     name: Build, vet and test
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        go-version: ["1.22"]
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Go ${{ matrix.go-version }}
+      # La versión de Go se lee de go.mod en vez de fijarse acá. Tenerla en dos lugares ya
+      # rompió el CI una vez: se subió el mínimo del módulo (por el driver de SQLite en Go
+      # puro) y este archivo se quedó atrás, así que todo fallaba en el primer `go build`.
+      - name: Set up Go (versión tomada de go.mod)
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version-file: go.mod
           cache: true
 
       - name: Verify formatting (gofmt)
@@ -39,6 +38,14 @@ jobs:
           if [ -n "$unformatted" ]; then
             echo "Los siguientes archivos no están formateados con gofmt:"
             echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "go.mod/go.sum quedaron desactualizados. Corre 'go mod tidy' y súbelo."
             exit 1
           fi
 
@@ -51,12 +58,204 @@ jobs:
       - name: go test
         run: go test ./... -v -race -cover
 
-      - name: Build stdio binary (smoke check)
-        run: go build -o bin/restaurant-mcp-server ./cmd/stdio
+      - name: Build binary
+        run: CGO_ENABLED=0 go build -o bin/restaurant-mcp-server ./cmd/server
 
-      - name: Manual protocol smoke test
+      # El binario se compila estático a propósito: es lo que permite copiarlo a cualquier
+      # máquina sin instalar nada. Si alguien introdujera una dependencia que exija cgo,
+      # esta compilación cruzada fallaría acá y no en la máquina de quien lo use.
+      - name: Cross-compile (portabilidad del driver SQLite en Go puro)
         run: |
-          echo '{"jsonrpc":"2.0","id":1,"method":"ping"}' | ./bin/restaurant-mcp-server > /tmp/out.json
-          grep -q '"result"' /tmp/out.json || (echo "El servidor no respondió como se esperaba" && exit 1)
-          echo "Smoke test OK:"
-          cat /tmp/out.json
+          set -euo pipefail
+          for target in windows/amd64 darwin/arm64 linux/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
+              go build -o /tmp/xc-check ./cmd/server
+            echo "  $target OK"
+          done
+
+      # Prueba de humo del protocolo real, no sólo un ping: handshake completo, una llamada
+      # a herramienta que toca SQLite, y una denegación por rol. Se usa una base en memoria
+      # para que la corrida no dependa de archivos ni deje residuos.
+      - name: Protocol smoke test (handshake + tools/call + RBAC)
+        run: |
+          set -euo pipefail
+
+          run_session() {
+            {
+              echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+              echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+              echo "$2"
+            } | MCP_USER_ROLE="$1" ./bin/restaurant-mcp-server --db :memory: 2>/dev/null
+          }
+
+          echo "--- 1. Un cocinero puede descontar inventario ---"
+          out=$(run_session cook '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"adjust_inventory","arguments":{"ingredientId":"cheese","operation":"subtract","quantity":10,"unit":"g","idempotencyKey":"ci-1"}}}')
+          echo "$out"
+          echo "$out" | grep -q '"resultingQuantity":30' \
+            || { echo "FALLO: el descuento no se aplicó sobre el inventario sembrado"; exit 1; }
+
+          echo "--- 2. Un mesero NO puede ---"
+          out=$(run_session waiter '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"adjust_inventory","arguments":{"ingredientId":"cheese","operation":"subtract","quantity":10,"unit":"g","idempotencyKey":"ci-2"}}}')
+          echo "$out"
+          echo "$out" | grep -q '"isError":true' \
+            || { echo "FALLO: el control de acceso por roles no denegó la operación"; exit 1; }
+
+          echo "--- 3. Una versión de protocolo desconocida se negocia, no falla ---"
+          out=$(echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2099-01-01","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            | ./bin/restaurant-mcp-server --db :memory: 2>/dev/null)
+          echo "$out"
+          echo "$out" | grep -q '"protocolVersion":"2025-06-18"' \
+            || { echo "FALLO: el servidor no negoció la versión"; exit 1; }
+          if echo "$out" | grep -q '"error"'; then
+            echo "FALLO: una versión distinta no debe producir un error"
+            exit 1
+          fi
+
+          echo "Smoke test OK"
+
+      # El transporte HTTP es la vía por la que el servidor queda expuesto a la red, así que
+      # sus defensas se comprueban en CI y no sólo en las pruebas unitarias.
+      - name: HTTP transport smoke test
+        run: |
+          set -euo pipefail
+
+          MCP_AUTH_TOKENS="tok-cook:cook:ana,tok-mesa:waiter:luis" \
+            ./bin/restaurant-mcp-server --http 127.0.0.1:8765 --db :memory: &
+          server_pid=$!
+          trap 'kill $server_pid 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8765/health > /dev/null && break
+            sleep 0.3
+          done
+          curl -sf http://127.0.0.1:8765/health || { echo "FALLO: el servidor no levantó"; exit 1; }
+
+          echo "--- sin token se rechaza con 401 ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8765/mcp \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}')
+          [ "$code" = "401" ] || { echo "FALLO: se esperaba 401, llegó $code"; exit 1; }
+
+          echo "--- con token se abre sesión ---"
+          session=$(curl -s -D - -o /dev/null -X POST http://127.0.0.1:8765/mcp \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer tok-cook' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            | grep -i '^mcp-session-id' | tr -d '\r' | cut -d' ' -f2)
+          [ -n "$session" ] || { echo "FALLO: no se recibió Mcp-Session-Id"; exit 1; }
+
+          curl -s -o /dev/null -X POST http://127.0.0.1:8765/mcp \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer tok-cook' \
+            -H "Mcp-Session-Id: $session" \
+            -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+          echo "--- el rol sale del token: el mesero es denegado ---"
+          waiter_session=$(curl -s -D - -o /dev/null -X POST http://127.0.0.1:8765/mcp \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer tok-mesa' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            | grep -i '^mcp-session-id' | tr -d '\r' | cut -d' ' -f2)
+          curl -s -o /dev/null -X POST http://127.0.0.1:8765/mcp \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer tok-mesa' \
+            -H "Mcp-Session-Id: $waiter_session" \
+            -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+          out=$(curl -s -X POST http://127.0.0.1:8765/mcp \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer tok-mesa' \
+            -H "Mcp-Session-Id: $waiter_session" \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"adjust_inventory","arguments":{"ingredientId":"cheese","operation":"subtract","quantity":10,"unit":"g","idempotencyKey":"ci-http"}}}')
+          echo "$out"
+          echo "$out" | grep -q '"isError":true' \
+            || { echo "FALLO: el rol del token no se aplicó"; exit 1; }
+
+          echo "--- una sesión no se puede usar con otra identidad ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8765/mcp \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer tok-mesa' \
+            -H "Mcp-Session-Id: $session" \
+            -d '{"jsonrpc":"2.0","id":3,"method":"tools/list"}')
+          [ "$code" = "403" ] || { echo "FALLO: se esperaba 403, llegó $code"; exit 1; }
+
+          echo "HTTP smoke test OK"
+
+      # Escuchar en una dirección pública sin credenciales debe ser imposible por accidente.
+      - name: Refuses to expose the network without credentials
+        run: |
+          set -uo pipefail
+          if ./bin/restaurant-mcp-server --http 0.0.0.0:8766 --db :memory: 2>&1 | grep -q "sin ninguna credencial"; then
+            echo "El servidor se negó a arrancar, como debe"
+          else
+            echo "FALLO: arrancó expuesto y sin autenticación"
+            exit 1
+          fi
+
+      # El servidor sólo puede escribir mensajes JSON-RPC en stdout: cualquier otra cosa
+      # corrompe el flujo del protocolo para el cliente que lo lee línea por línea.
+      - name: Verify stdout carries only JSON-RPC
+        run: |
+          set -euo pipefail
+          # El arranque escribe tres líneas de diagnóstico; si alguna se fuera a stdout en
+          # vez de stderr, aparecería acá. Se comprueba con grep y no con jq para no
+          # depender de una herramienta externa en una verificación tan simple.
+          echo '{"jsonrpc":"2.0","id":1,"method":"ping"}' \
+            | ./bin/restaurant-mcp-server --db :memory: 2>/dev/null > /tmp/stdout.txt
+          while IFS= read -r line; do
+            case "$line" in
+              '{"jsonrpc":"2.0"'*) ;;
+              *) echo "Línea inesperada en stdout: $line"; exit 1 ;;
+            esac
+          done < /tmp/stdout.txt
+          test -s /tmp/stdout.txt || { echo "El servidor no respondió al ping"; exit 1; }
+          echo "stdout limpio"
+
+  docker:
+    name: Docker image builds and runs
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t restaurant-mcp:ci .
+
+      # Que la imagen compile no dice nada: lo que importa es que el proceso arranque como
+      # usuario sin privilegios y pueda escribir su base en el volumen. Ese fallo sólo
+      # aparece en tiempo de ejecución.
+      - name: Run image and talk to it
+        run: |
+          set -euo pipefail
+
+          docker run -d --rm --name mcp-ci -p 127.0.0.1:8080:8080 \
+            -e MCP_AUTH_TOKENS="tok:cook:ana" restaurant-mcp:ci
+
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/health > /dev/null && break
+            sleep 0.5
+          done
+
+          curl -sf http://127.0.0.1:8080/health || {
+            echo "FALLO: el contenedor no respondió"; docker logs mcp-ci; exit 1; }
+
+          session=$(curl -s -D - -o /dev/null -X POST http://127.0.0.1:8080/mcp \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer tok' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            | grep -i '^mcp-session-id' | tr -d '\r' | cut -d' ' -f2)
+          curl -s -o /dev/null -X POST http://127.0.0.1:8080/mcp \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer tok' \
+            -H "Mcp-Session-Id: $session" -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+          out=$(curl -s -X POST http://127.0.0.1:8080/mcp \
+            -H 'Content-Type: application/json' -H 'Authorization: Bearer tok' \
+            -H "Mcp-Session-Id: $session" \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_dish_availability","arguments":{"dishId":"special-burger","servings":2}}}')
+          echo "$out"
+          echo "$out" | grep -q '"maximumServings":0' || {
+            echo "FALLO: el dominio no respondió desde el contenedor"; docker logs mcp-ci; exit 1; }
+
+          docker stop mcp-ci
+          echo "Imagen OK"
+
+      - name: Image must not run as root
+        run: |
+          user=$(docker inspect restaurant-mcp:ci --format '{{.Config.User}}')
+          [ -n "$user" ] && [ "$user" != "root" ] || {
+            echo "FALLO: la imagen corre como root (USER=$user)"; exit 1; }
+          echo "USER=$user"
