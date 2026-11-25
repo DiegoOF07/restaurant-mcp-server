@@ -4,7 +4,6 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/domain"
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/jsonrpc"
@@ -104,10 +103,7 @@ func (r *Registry) Call(name string, rawArgs json.RawMessage) (CallToolResult, *
 	// El permiso se valida ACÁ, en el servidor. Que la interfaz también pida confirmación
 	// es una capa distinta y no sustituye a esta.
 	if !tool.RequiredRoles.Allows(r.role) {
-		return errorResult(fmt.Sprintf(
-			"el rol %q no está autorizado para ejecutar %q; se requiere uno de: %s",
-			r.role, name, strings.Join(tool.RequiredRoles.Names(), ", "),
-		)), nil
+		return errorResult(fmt.Sprintf("Tu rol (%s) no puede %s.", roleName(r.role), toolAction(name))), nil
 	}
 
 	return tool.handler(CallContext{Repo: r.repo, Role: r.role, UserID: r.userID}, rawArgs)

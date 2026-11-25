@@ -313,7 +313,7 @@ func TestRoleComesFromTokenNotFromHeaders(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"isError":true`) {
 		t.Fatalf("el mesero logró ajustar inventario mandando cabeceras: %s", rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "no está autorizado") {
+	if !strings.Contains(rec.Body.String(), "no puede ajustar el inventario") {
 		t.Errorf("respuesta inesperada: %s", rec.Body.String())
 	}
 }
