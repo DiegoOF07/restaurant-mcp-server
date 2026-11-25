@@ -214,8 +214,7 @@ That way the assistant can explain it to the user in natural language ("ask some
 kitchen") instead of the host blowing up with an exception.
 
 ```
-el rol "waiter" no está autorizado para ejecutar "adjust_inventory";
-se requiere uno de: cook, admin
+Tu rol (Mesero) no puede ajustar el inventario.
 ```
 
 ---

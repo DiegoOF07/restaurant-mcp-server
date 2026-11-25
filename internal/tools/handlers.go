@@ -9,6 +9,12 @@ import (
 	"github.com/DiegoOF07/restaurant-mcp-server/internal/storage"
 )
 
+// Mensajes que ve el personal: sin identificadores internos ni términos en inglés.
+const (
+	msgDishNotFound       = "No encontré ese platillo en el menú."
+	msgIngredientNotFound = "No encontré ese ingrediente en el inventario."
+)
+
 // RegisterRestaurantTools agrega las cuatro herramientas iniciales del
 // restaurante a un Registry
 func RegisterRestaurantTools(r *Registry) {
@@ -128,6 +134,7 @@ type missingIngredient struct {
 	Required     int64  `json:"required"`
 	Available    int64  `json:"available"`
 	Unit         string `json:"unit"`
+	Name         string `json:"name"`
 }
 
 type dishAvailabilityResult struct {
@@ -148,7 +155,7 @@ func handleGetDishAvailability(ctx CallContext, rawArgs json.RawMessage) (CallTo
 
 	dish, ok := ctx.Repo.FindDish(args.DishID)
 	if !ok {
-		return errorResult(fmt.Sprintf("no existe el platillo %q", args.DishID)), nil
+		return errorResult(msgDishNotFound), nil
 	}
 	if !dish.Active {
 		// Las recetas inactivas no se deben ofrecer como disponibles
@@ -185,6 +192,7 @@ func handleGetDishAvailability(ctx CallContext, rawArgs json.RawMessage) (CallTo
 		if required > available {
 			missing = append(missing, missingIngredient{
 				IngredientID: ing.ID,
+				Name:         ing.Name,
 				Required:     required,
 				Available:    available,
 				Unit:         string(ing.BaseUnit),
@@ -204,7 +212,7 @@ func handleGetDishAvailability(ctx CallContext, rawArgs json.RawMessage) (CallTo
 		MissingIngredients: missing,
 	}
 
-	summary := fmt.Sprintf("%s: se solicitaron %d porción(es); el máximo posible ahora mismo es %d.", dish.Name, args.Servings, maxServings)
+	summary := fmt.Sprintf("%s: alcanza para %d porción(es) de %d.", dish.Name, maxServings, args.Servings)
 	return okResult(summary, result), nil
 }
 
@@ -236,7 +244,7 @@ func handleGetRecipeDetails(ctx CallContext, rawArgs json.RawMessage) (CallToolR
 
 	dish, ok := ctx.Repo.FindDish(args.DishID)
 	if !ok {
-		return errorResult(fmt.Sprintf("no existe el platillo %q", args.DishID)), nil
+		return errorResult(msgDishNotFound), nil
 	}
 
 	recipe, _ := ctx.Repo.RecipeForDish(args.DishID)
@@ -278,6 +286,7 @@ type adjustInventoryResult struct {
 	ResultingQuantity int64  `json:"resultingQuantity"`
 	Unit              string `json:"unit"`
 	Idempotent        bool   `json:"idempotent"`
+	Name              string `json:"name"`
 }
 
 func handleAdjustInventory(ctx CallContext, rawArgs json.RawMessage) (CallToolResult, *jsonrpc.ErrorObject) {
@@ -294,14 +303,12 @@ func handleAdjustInventory(ctx CallContext, rawArgs json.RawMessage) (CallToolRe
 
 	ing, ok := ctx.Repo.Ingredient(args.IngredientID)
 	if !ok {
-		return errorResult(fmt.Sprintf("no existe el ingrediente %q", args.IngredientID)), nil
+		return errorResult(msgIngredientNotFound), nil
 	}
 
 	quantityBase, err := domain.ToBaseUnits(args.Quantity, domain.Unit(args.Unit), ing.BaseUnit)
 	if err != nil {
-		return errorResult(fmt.Sprintf(
-			"la unidad %q no es compatible con el ingrediente %q (unidad base: %s)", args.Unit, ing.ID, ing.BaseUnit,
-		)), nil
+		return errorResult(fmt.Sprintf("No puedo usar %s para %s; se mide en %s.", unitLabel(args.Unit), ing.Name, unitName(ing.BaseUnit))), nil
 	}
 
 	result, err := ctx.Repo.ApplyMovement(storage.MovementRequest{
@@ -316,12 +323,11 @@ func handleAdjustInventory(ctx CallContext, rawArgs json.RawMessage) (CallToolRe
 		switch err {
 		case domain.ErrInsufficientInventory:
 			return errorResult(fmt.Sprintf(
-				"la operación %q de %d %s sobre %q dejaría el inventario en negativo; disponible actualmente: %d %s",
-				args.Operation, quantityBase, ing.BaseUnit, ing.ID,
-				mustCurrentQuantity(ctx.Repo, ing.ID), ing.BaseUnit,
+				"No hay suficiente %s: hay %s y se pedía restar %s.",
+				ing.Name, readableQuantity(mustCurrentQuantity(ctx.Repo, ing.ID), ing.BaseUnit), readableQuantity(quantityBase, ing.BaseUnit),
 			)), nil
 		case domain.ErrIngredientNotFound:
-			return errorResult(fmt.Sprintf("no existe el ingrediente %q", args.IngredientID)), nil
+			return errorResult(msgIngredientNotFound), nil
 		default:
 			return CallToolResult{}, jsonrpc.InternalError("no se pudo aplicar el movimiento de inventario")
 		}
@@ -335,13 +341,13 @@ func handleAdjustInventory(ctx CallContext, rawArgs json.RawMessage) (CallToolRe
 		ResultingQuantity: result.Movement.ResultingQuantity,
 		Unit:              string(ing.BaseUnit),
 		Idempotent:        result.Idempotent,
+		Name:              ing.Name,
 	}
 
-	summary := fmt.Sprintf(
-		"%s: la operación %s llevó el inventario de %d a %d %s.", ing.Name, args.Operation, out.PreviousQuantity, out.ResultingQuantity, ing.BaseUnit,
-	)
+	summary := fmt.Sprintf("%s: %s → %s.", ing.Name,
+		readableQuantity(out.PreviousQuantity, ing.BaseUnit), readableQuantity(out.ResultingQuantity, ing.BaseUnit))
 	if result.Idempotent {
-		summary += " (ese idempotencyKey ya se había aplicado; no se hizo ningún cambio)"
+		summary += " Este ajuste ya se había registrado; no se volvió a aplicar."
 	}
 	return okResult(summary, out), nil
 }

@@ -190,8 +190,7 @@ protocolo JSON-RPC. Así el asistente puede explicárselo al usuario en lenguaje
 («pedíselo a alguien de cocina») en lugar de que el host reviente con una excepción.
 
 ```
-el rol "waiter" no está autorizado para ejecutar "adjust_inventory";
-se requiere uno de: cook, admin
+Tu rol (Mesero) no puede ajustar el inventario.
 ```
 
 ---
